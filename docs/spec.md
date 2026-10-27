@@ -146,5 +146,6 @@ No per-row refresh map in v1 — one global REF covers the model.
 | Params, enums, address helpers | in `dram_pkg` |
 | Timing FSM + refresh slot + open-row policy | in `mem_ctrl` |
 | Model ACT/RD/WR/PRE/REF + tCL/tRFC | in `dram_model` |
-| Directed TB WR→RD (page hit) | in `tb/tb_mem_ctrl.sv` |
-| Bank-conflict stress + REF-under-load coverage | **TODO** |
+| Directed TB: hit / page-miss / multi-bank conflict | in `tb/tb_mem_ctrl.sv` |
+| Model `access_err` + `bank_open_oh` observability | in `dram_model` / top |
+| REF-under-load coverage | **TODO** |

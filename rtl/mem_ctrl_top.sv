@@ -16,7 +16,12 @@ module mem_ctrl_top
   output logic              rsp_valid,
   input  logic              rsp_ready,
   output logic [DATA_BITS-1:0] rsp_rdata,
-  output logic              rsp_err
+  output logic              rsp_err,
+
+  // Model observability (TB / debug)
+  output logic              dram_page_hit,
+  output logic              dram_access_err,
+  output logic [NUM_BANKS-1:0] dram_bank_open
 );
 
   logic              c_req_valid, c_req_ready, c_req_write;
@@ -32,6 +37,8 @@ module mem_ctrl_top
   logic [DATA_BITS-1:0] d_wdata;
   logic              d_busy, d_data_valid, d_page_hit;
   logic [DATA_BITS-1:0] d_rdata;
+  logic              d_access_err;
+  logic [NUM_BANKS-1:0] d_bank_open;
 
   host_if #(
     .ADDR_W(ADDR_BITS),
@@ -93,7 +100,13 @@ module mem_ctrl_top
     .busy(d_busy),
     .data_valid(d_data_valid),
     .rdata(d_rdata),
-    .page_hit(d_page_hit)
+    .page_hit(d_page_hit),
+    .access_err(d_access_err),
+    .bank_open_oh(d_bank_open)
   );
+
+  assign dram_page_hit   = d_page_hit;
+  assign dram_access_err = d_access_err;
+  assign dram_bank_open  = d_bank_open;
 
 endmodule

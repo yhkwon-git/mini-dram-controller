@@ -1,30 +1,28 @@
-// Educational mini-DRAM package — own timing model, NOT JEDEC/HBM compliant.
+// Mini-DRAM package — geometry, timing, commands, FSM states (see docs/spec.md).
 `timescale 1ns/1ps
 
 package dram_pkg;
 
   // ---------------------------------------------------------------------------
-  // Geometry (placeholders — educational only)
+  // Geometry — matches docs/spec.md address map
   // ---------------------------------------------------------------------------
   localparam int NUM_BANKS      = 4;
   localparam int ROW_BITS       = 8;   // 256 rows / bank
   localparam int COL_BITS       = 4;   // 16 columns / row
   localparam int DATA_BITS      = 32;
-  localparam int ADDR_BITS      = $clog2(NUM_BANKS) + ROW_BITS + COL_BITS;
+  localparam int ADDR_BITS      = $clog2(NUM_BANKS) + ROW_BITS + COL_BITS; // 14
 
   // ---------------------------------------------------------------------------
-  // Educational timing (clock cycles) — placeholders, not real DRAM numbers
+  // Timing (clock cycles) — own model; see docs/spec.md
   // ---------------------------------------------------------------------------
   localparam int tRCD = 3;   // ACT -> RD/WR
   localparam int tRP  = 3;   // PRE -> ACT
   localparam int tRAS = 6;   // ACT -> PRE (min)
-  localparam int tRC  = 9;   // ACT -> ACT same bank (approx tRAS+tRP)
-  localparam int tRFC = 12;  // REF duration placeholder
-  localparam int tCL  = 2;   // CAS latency (RD data return)
+  localparam int tRC  = 9;   // ACT -> ACT same bank (≈ tRAS+tRP)
+  localparam int tRFC = 12;  // REF busy window
+  localparam int tCL  = 2;   // RD -> data_valid
   localparam int tWR  = 2;   // WR recovery before PRE
-
-  // Refresh interval (host clocks between REF opportunities) — placeholder
-  localparam int tREFI = 64;
+  localparam int tREFI = 64; // refresh opportunity period
 
   // ---------------------------------------------------------------------------
   // DRAM command encoding (controller -> model)

@@ -144,7 +144,7 @@ No per-row refresh map in v1 — one global REF covers the model.
 | Item | Status |
 |------|--------|
 | Params, enums, address helpers | in `dram_pkg` |
-| Ports + FSM skeleton | in `mem_ctrl` |
-| Model ACT/RD/WR/PRE/REF stubs | in `dram_model` |
-| Enforce tRCD/tRP/tRAS/tCL/tWR; hit/miss schedule | **TODO** |
-| Directed TB (WR→RD, conflict, refresh under load) | **TODO** |
+| Timing FSM + refresh slot + open-row policy | in `mem_ctrl` |
+| Model ACT/RD/WR/PRE/REF + tCL/tRFC | in `dram_model` |
+| Directed TB WR→RD (page hit) | in `tb/tb_mem_ctrl.sv` |
+| Bank-conflict stress + REF-under-load coverage | **TODO** |

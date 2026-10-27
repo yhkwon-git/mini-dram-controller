@@ -6,7 +6,7 @@ SystemVerilog 기반 미니 DRAM 메모리 컨트롤러 — 자체 타이밍 모
 | | |
 |--|--|
 | **Repo** | https://github.com/yhkwon-git/mini-dram-controller |
-| **Status** | Skeleton + compile-smoke TB (scheduler TBD) |
+| **Status** | Timing FSM + hit/miss/multi-bank TB; see throughput note |
 | **License** | MIT |
 
 ---
@@ -15,17 +15,19 @@ SystemVerilog 기반 미니 DRAM 메모리 컨트롤러 — 자체 타이밍 모
 
 Host bus (`host_if`) → **mem_ctrl** timing FSM (ACT / RD / WR / PRE / REF) → sync **dram_model**.
 
-- Latency knobs and open-row tracking in the model  
-- Refresh slot + bank-conflict hooks (stubs for now)  
-- Verilator smoke TB; optional cocotb  
+- Open-row hit/miss + multi-bank; refresh slot at IDLE  
+- Verilator directed TB; optional cocotb  
 - 호스트 버스 → 타이밍 FSM → DRAM 모델; Verilator / cocotb로 시뮬레이션
 
 ```
 rtl/          dram_pkg, host_if, dram_model, mem_ctrl, mem_ctrl_top
-tb/           tb_mem_ctrl.sv (SV smoke), test_mem_ctrl.py (cocotb stub)
-docs/spec.md  timing params, address map, FSM states
+tb/           tb_mem_ctrl.sv, test_mem_ctrl.py
+docs/spec.md  timing, address map, FSM
+docs/scheduler-throughput.md  hit/miss/multi-bank latency & throughput note
 Makefile      sim / lint / sim-cocotb
 ```
+
+PPA-style note: [docs/scheduler-throughput.md](docs/scheduler-throughput.md) (hit vs miss vs multi-bank, refresh tax, v1 tradeoffs).
 
 ---
 
@@ -64,7 +66,5 @@ wsl -e bash -lc "cd /mnt/d/mini-dram-controller && make sim"
 
 | Horizon | Focus |
 |---------|--------|
-| **~2 weeks** | Spec fill-in, enforce tRCD/tRP/tRAS in FSM, directed WR→RD + refresh tests, waves |
-| **4–6 weeks** | Bank conflict + page hit/miss policy, throughput/latency note, coverage, 1p PPA |
-
-Later artifacts: 1–2p spec · RTL · TB · waves/coverage note · 1p PPA.
+| **Done (scaffold)** | Spec, timing FSM, hit/miss/multi-bank TB, [throughput note](docs/scheduler-throughput.md) |
+| **Next** | REF-under-load, cycle counters in TB, waves/coverage, cmd-queue / bank-parallel sketch |

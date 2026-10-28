@@ -104,9 +104,6 @@ module dram_model
       end
 
       if (!rfc_active) begin
-        row_match     = bank_open[bank] && (bank_row[bank] == row);
-        legal_access  = row_match;
-
         unique case (cmd)
           CMD_ACT: begin
             // Opening a new row on an already-open bank without PRE is a conflict
@@ -121,19 +118,19 @@ module dram_model
             page_hit        <= 1'b0;
           end
           CMD_RD: begin
-            page_hit   <= legal_access;
-            access_err <= ~legal_access;
+            page_hit   <= bank_open[bank] && (bank_row[bank] == row);
+            access_err <= ~(bank_open[bank] && (bank_row[bank] == row));
             rd_active  <= 1'b1;
-            rd_was_hit <= legal_access;
+            rd_was_hit <= bank_open[bank] && (bank_row[bank] == row);
             rd_cnt     <= tCL[$bits(rd_cnt)-1:0];
             rd_bank    <= bank;
             rd_row     <= row;
             rd_col     <= col;
           end
           CMD_WR: begin
-            page_hit   <= legal_access;
-            access_err <= ~legal_access;
-            if (legal_access)
+            page_hit   <= bank_open[bank] && (bank_row[bank] == row);
+            access_err <= ~(bank_open[bank] && (bank_row[bank] == row));
+            if (bank_open[bank] && (bank_row[bank] == row))
               mem[mem_index(bank, row, col)] <= wdata;
           end
           CMD_REF: begin

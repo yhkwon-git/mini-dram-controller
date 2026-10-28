@@ -11,6 +11,8 @@ package dram_pkg;
   localparam int COL_BITS       = 4;   // 16 columns / row
   localparam int DATA_BITS      = 32;
   localparam int ADDR_BITS      = $clog2(NUM_BANKS) + ROW_BITS + COL_BITS; // 14
+  localparam int QUEUE_DEPTH    = 4;   // host request queue (multi-outstanding)
+  localparam int QUEUE_AW       = $clog2(QUEUE_DEPTH);
 
   // ---------------------------------------------------------------------------
   // Timing (clock cycles) — own model; see docs/spec.md

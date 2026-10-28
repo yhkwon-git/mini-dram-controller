@@ -1,33 +1,35 @@
 # Mini DRAM Controller + Simple DRAM Model
 
 SystemVerilog mini DRAM memory controller with a simple synchronous DRAM model (own timing parameters, banks, open-page hit/miss).  
-SystemVerilog 기반 미니 DRAM 메모리 컨트롤러 — 자체 타이밍 모델, 뱅크, 페이지 hit/miss.
+SystemVerilog 기반 미니 DRAM 메모리 컨트롤러 — 자체 타이밍 모델, 뱅크, 페이지 hit/miss, 요청 큐·뱅크 병렬 스케줄.
 
 | | |
 |--|--|
 | **Repo** | https://github.com/yhkwon-git/mini-dram-controller |
-| **Status** | Timing FSM + hit/miss/multi-bank TB; see throughput note |
+| **Status** | Queue + bank-parallel scheduler; directed TB PASS |
 | **License** | MIT |
 
 ---
 
 ## Overview / 구성
 
-Host bus (`host_if`) → **mem_ctrl** timing FSM (ACT / RD / WR / PRE / REF) → sync **dram_model**.
+Host (`host_if`) → **depth-4 request queue** → **per-bank timing engines** + cmd arbiter → `dram_model`.
 
-- Open-row hit/miss + multi-bank; refresh slot at IDLE  
-- Verilator directed TB; optional cocotb  
-- 호스트 버스 → 타이밍 FSM → DRAM 모델; Verilator / cocotb로 시뮬레이션
+- Page hit/miss + multi-bank; refresh when due (drain then REF)  
+- One DRAM command per cycle; bank timers run in parallel  
+- Verilator directed TB (`make sim`)  
+- 호스트 → 큐 → 뱅크별 FSM → 모델
 
 ```
-rtl/          dram_pkg, host_if, dram_model, mem_ctrl, mem_ctrl_top
-tb/           tb_mem_ctrl.sv, test_mem_ctrl.py
-docs/spec.md  timing, address map, FSM
-docs/scheduler-throughput.md  hit/miss/multi-bank latency & throughput note
-Makefile      sim / lint / sim-cocotb
+rtl/     dram_pkg, host_if, dram_model, mem_ctrl, mem_ctrl_top
+tb/      tb_mem_ctrl.sv, test_mem_ctrl.py
+docs/    spec.md, scheduler-throughput.md, coverage.md
+Makefile sim / lint / sim-cocotb
 ```
 
-PPA-style note: [docs/scheduler-throughput.md](docs/scheduler-throughput.md) (hit vs miss vs multi-bank, refresh tax, v1 tradeoffs).
+- Spec: [docs/spec.md](docs/spec.md)  
+- Throughput / tradeoffs: [docs/scheduler-throughput.md](docs/scheduler-throughput.md)  
+- Coverage vs gaps: [docs/coverage.md](docs/coverage.md)  
 
 ---
 
@@ -36,29 +38,21 @@ PPA-style note: [docs/scheduler-throughput.md](docs/scheduler-throughput.md) (hi
 ### Linux / WSL (recommended)
 
 ```bash
-# Ubuntu example
 sudo apt update && sudo apt install -y verilator make build-essential
-
-cd /mnt/d/mini-dram-controller   # if cloned on D:\ under Windows
+cd /mnt/d/mini-dram-controller   # if on D:\ under Windows
 make check-tools
-make lint      # optional
-make sim       # Verilator build + idle smoke TB
+make sim
 ```
 
-Optional cocotb:
-
-```bash
-pip install cocotb
-make sim-cocotb
-```
+Optional cocotb: `pip install cocotb && make sim-cocotb`
 
 ### Native Windows
-
-Use WSL for Verilator:
 
 ```powershell
 wsl -e bash -lc "cd /mnt/d/mini-dram-controller && make sim"
 ```
+
+Sim artifacts go to `obj_dir/` (gitignored). `sim/` is only a placeholder (`.gitkeep`).
 
 ---
 
@@ -66,5 +60,5 @@ wsl -e bash -lc "cd /mnt/d/mini-dram-controller && make sim"
 
 | Horizon | Focus |
 |---------|--------|
-| **Done (scaffold)** | Spec, timing FSM, hit/miss/multi-bank TB, [throughput note](docs/scheduler-throughput.md) |
-| **Next** | REF-under-load, cycle counters in TB, waves/coverage, cmd-queue / bank-parallel sketch |
+| **Done** | Spec, queue+bank-parallel FSM, hit/miss/multi-bank/burst TB, throughput + coverage |
+| **Next** | REF-under-load, waves CI, random/coverage bins, hit-prefer / auto-PRE experiments |

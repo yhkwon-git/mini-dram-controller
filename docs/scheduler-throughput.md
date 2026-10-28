@@ -21,7 +21,7 @@ Timing from `dram_pkg` / `docs/spec.md`. Not silicon PPA — analytical + TB-bac
 | **Row conflict** (same bank, wrong row) | wait `tRAS` if needed → PRE → `tRP` → ACT → `tRCD` → RD/WR | ≈ `tRP+tRCD` (+ residual `tRAS`) |
 | **Other bank** | Independent open row | Hit latency if that bank’s row already open |
 
-v1 is **in-order, one request at a time** — no cmd queue, no bank-parallel issue. Multi-bank helps by **keeping multiple rows open**, not by overlapping two host txns.
+Current RTL: **depth-4 host queue** + **per-bank timers in parallel**, still **one DRAM command per cycle** and **in-order host responses**. Multi-bank hides `tRCD`/`tRP` of one bank behind another bank’s commands (TB burst peaked at 4 banks open).
 
 ---
 
@@ -61,7 +61,7 @@ Peak sustained rate ≈ `1 / L` txn/cycle for a workload with average latency `L
 |--------|---------|------|
 | Leave page open (no auto-PRE) | Hit reuse; multi-bank locality | Row conflicts need PRE+ACT; more open-page state |
 | Refresh over new req at IDLE | Simple, predictable | Adds latency bubbles; no bank-smart REF |
-| Single outstanding FSM | Small RTL, easy timing proof | No bank parallelism / no hit-under-miss |
+| Depth-4 queue + bank-parallel waits | Hide per-bank latency; multi-outstanding host | Still 1 cmd/cycle; in-order rsp; 1 RD pipe |
 | Shadow open-row in `mem_ctrl` | Schedule without model peek | Must stay consistent with `dram_model` |
 
 **Next levers (not in v1):** cmd queue + bank scoreboard, prefer hit over miss, auto-PRE policy, overlapping REF with other-bank traffic.

@@ -39,7 +39,9 @@ package dram_pkg;
   } dram_cmd_e;
 
   // ---------------------------------------------------------------------------
-  // Controller FSM states (skeleton)
+  // Per-bank engine states (mem_ctrl keeps one b_state per bank).
+  // ST_REF / ST_REF_WAIT / ST_ERROR are reserved: refresh is handled by the
+  // global ref_active flag in mem_ctrl, not by a bank state.
   // ---------------------------------------------------------------------------
   typedef enum logic [3:0] {
     ST_IDLE,

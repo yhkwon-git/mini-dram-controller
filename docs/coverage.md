@@ -4,34 +4,39 @@
 
 | # | Scenario | Checks |
 |---|----------|--------|
-| 1 | Page hit WR→RD | Data match; open-row reuse |
-| 2 | Page miss (same bank, new row) | PRE→ACT path; old+new row data |
+| 1 | Page hit WR→RD | Read-back data (the hit path itself is not asserted) |
+| 2 | Page miss (same bank, new row) | PRE→ACT path; old + new row data |
 | 3 | Multi-bank + row conflict | Bank1 data survives bank0 row change |
-| 4 | Queue burst (4 banks) | Depth-4 accept; **peak `bank_open` ≥ 2** (observed 4); RD back all data |
-| — | Model `access_err` | Must stay 0 under legal schedule |
+| 4 | 4-bank write burst | ≥ 2 bank engines busy in the same cycle (observed 4); read-back of all 4 words |
+| 5 | Response back-pressure | `rsp_ready` low for 150 cycles while 20 reads are issued (more than the 16 tags): 20/20 responses, in order, correct data; ≥ 1 REF during the scenario |
+| — | Model `access_err` | Must stay 0 under the controller's schedule |
 | — | `rsp_err` | Must stay 0 |
+
+Scenario 5 fails on the pre-fix RTL (commit `6049e5a`): the 17th read reuses the tag of the first, still-buffered read, so the first response returns the 17th read's data (`0x50000010` instead of `0x50000000`).
+
+Scenario 4 used to check "≥ 2 banks open". With an open-page policy banks stay open after a serial schedule too (and two were already open before the burst), so it now counts bank engines that are busy at the same time.
 
 ## Cheap checks in TB / RTL
 
-- TB tallies `dram_access_err` pulses  
-- TB rejects unexpected `rsp_err`  
-- In-order host responses via tag scoreboard (`tag_retire`)  
-- Single outstanding DRAM RD (`rd_inflight`) — model has one CAS data pipe  
+- TB tallies `dram_access_err` pulses and `CMD_REF` commands
+- TB rejects unexpected `rsp_err`
+- In-order host responses via tag scoreboard (`tag_retire`), at most 15 requests in flight
+- Single outstanding DRAM RD (`rd_inflight`) — model has one CAS data pipe
 
 ## Gaps (not yet automated)
 
 | Gap | Notes |
 |-----|--------|
-| REF-under-load | Forced `tREFI` expiry mid-traffic + functional continue |
-| Backpressure | `rsp_ready` low for long periods / queue full stall |
-| Same-bank queue depth | Several entries to one bank while others idle |
+| Queue depth | Host tasks hand over one request at a time, so queue occupancy stays ≤ 1 — slots 1–3 and same-bank reordering are not exercised |
+| Write-hit path | Dispatch straight to `ST_WR` on an open row never happens in the TB |
+| Model error paths | `access_err` never fires — no negative tests (missing PRE, wrong row) |
+| Timing assertions | `dram_model` does not check command spacing (tRCD / tRP / tRAS / tRC / tWR); add SVA or a bind checker |
+| REF under heavy load | No test forces `ref_due` while all four banks are busy |
 | Random traffic / coverage bins | Hit/miss/PRE/ACT/REF cross |
-| Formal / SVA | tRAS/tRP/tRCD properties as bind assertions |
-| Wave dump regression | `WAVES=1` artifact in CI |
-| cocotb path | `test_mem_ctrl.py` still smoke-level |
+| cocotb path | `test_mem_ctrl.py` is a reset/idle smoke test |
 
 ## How to extend
 
-1. Add a TB task that waits until `refi` near 0, then issues traffic.  
-2. Drive `rsp_ready` low during scenario 4 and drain later (watch for deadlock).  
-3. `make sim WAVES=1` and archive a short FST/VCD for the portfolio.
+1. Non-blocking host driver (several requests before the first response) to fill the queue and reach the write-hit path.
+2. Negative tests that drive `dram_model` directly (ACT on an open bank, RD on a closed bank) and expect `access_err`.
+3. Per-bank command-spacing SVA; `make sim WAVES=1` writes `tb_mem_ctrl.vcd` for waveform checks.

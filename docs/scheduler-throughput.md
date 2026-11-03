@@ -1,7 +1,7 @@
 # Scheduler latency & throughput note / 스케줄러·처리량 노트
 
-1-page PPA-style note for the v1 **single-outstanding** `mem_ctrl` FSM.  
-Timing from `dram_pkg` / `docs/spec.md`. Not silicon PPA — analytical + TB-backed behavior.
+1-page PPA-style note for the v1 `mem_ctrl`: depth-4 request queue, 4 bank engines, one-command-per-cycle arbiter, in-order responses.  
+Timing from `dram_pkg` / `docs/spec.md`. Not silicon PPA — cycle counts measured on `tb_mem_ctrl` waveforms; details in the [portfolio deck](../portfolio-deck/MiniDramController_Portfolio.pdf).
 
 | Knob | Value |
 |------|------:|
@@ -21,37 +21,37 @@ Timing from `dram_pkg` / `docs/spec.md`. Not silicon PPA — analytical + TB-bac
 | **Row conflict** (same bank, wrong row) | wait `tRAS` if needed → PRE → `tRP` → ACT → `tRCD` → RD/WR | ≈ `tRP+tRCD` (+ residual `tRAS`) |
 | **Other bank** | Independent open row | Hit latency if that bank’s row already open |
 
-Current RTL: **depth-4 host queue** + **per-bank timers in parallel**, still **one DRAM command per cycle** and **in-order host responses**. Multi-bank hides `tRCD`/`tRP` of one bank behind another bank’s commands (TB burst peaked at 4 banks open).
+Each bank engine counts its own `tRCD` / `tRP` / `tRAS`, so while one bank waits, the arbiter can issue another bank's ACT / PRE / RD / WR. Still one DRAM command per cycle, and host responses stay in order (16-entry response buffer, ≤ 15 requests in flight).
 
 ---
 
-## 2. Approximate host latency (cycles)
+## 2. Measured host latency (cycles)
 
-Counts are **accept → response handshake**, steady `rsp_ready=1`, ignoring REF. ±1–2 cycles of FSM/handshake overhead.
+Accept → response handshake with `rsp_ready = 1`, from the `tb_mem_ctrl` run. v0 = the single-FSM controller (commit `64e73e0`) driven by the same TB. The tag fix after `6049e5a` only limits acceptance at 15 in flight, so these numbers hold for HEAD.
 
-| Scenario | RD (cycles) | WR (cycles) | Rough formula |
-|----------|------------:|------------:|---------------|
-| Page hit | ~4–5 | ~3–4 | RD: `≈ 1 + tCL + rsp`; WR: `≈ 1 + tWR + rsp` |
-| Cold miss (closed bank) | ~7–9 | ~6–8 | `≈ 1 + tRCD + (tCL\|tWR) + rsp` |
-| Row conflict (PRE needed, `tRAS` done) | ~10–13 | ~9–12 | `≈ 1 + tRP + tRCD + (tCL\|tWR) + rsp` |
-| Row conflict + remaining `tRAS` | higher | higher | add leftover `ras_rem` before PRE |
+| Class | v0 | v1 | Where v1's extra cycles come from |
+|-------|---:|---:|------------------------------------|
+| Page hit RD | 4 | 6 | queue stage +1, response buffer +1 |
+| Closed-bank RD | 7 | 10 | + wait→issue handoff +1 (RD goes out the cycle after `ACT_WAIT` ends) |
+| Closed-bank WR | 6 | 9–12 | same; the range is arbitration against other banks |
+| Row-conflict RD | 11 | 14 | handoff after both `PRE_WAIT` and `ACT_WAIT` |
+| Row-conflict WR | 10 | 13–14 | same |
 
-**Multi-bank example:** bank0 row A open + access bank1 row B (closed) → bank1 pays **cold miss**, bank0 stays open; next access to bank0 row A is still a **hit**. TB scenario 3 covers this (`tb/tb_mem_ctrl.sv`).
+Write hits do not occur in the TB.
 
 ---
 
-## 3. Throughput (single outstanding)
+## 3. Throughput
 
-Peak sustained rate ≈ `1 / L` txn/cycle for a workload with average latency `L`.
+| Metric | v0 | v1 |
+|--------|---:|---:|
+| 4 writes to 4 banks, first accept → last response | 35 cycles | 17 cycles (2.06×) |
+| Bank engines busy in the same cycle during the burst | 1 | up to 4 |
+| Back-to-back RD | — | ≤ 1 per 4 cycles (single read pipe, `rd_inflight`) |
 
-| Mix | Avg L (illustrative) | Relative txn rate |
-|-----|---------------------:|------------------:|
-| 100% hit RD | ~5 | 1.00× (baseline) |
-| 100% cold miss RD | ~8 | ~0.6× |
-| 100% row-conflict RD | ~12 | ~0.4× |
-| 50% hit / 50% conflict | ~8.5 | ~0.6× |
+During the burst a command goes out every cycle for 8 cycles — with 4 banks the single command slot, not bank timing, becomes the limit.
 
-**Refresh tax:** every `tREFI` clocks, IDLE prefers REF (`tRFC` busy ≈ 12). At hit-only traffic, REF steals roughly `tRFC / tREFI ≈ 12/64 ≈ 19%` of wall time when the counter always expires in IDLE — lower if traffic delays the slot.
+**Refresh tax:** requests are blocked while REF is due or active (drain + `tRFC`). Measured over the TB run: 18.3 % of cycles (estimate `tRFC / tREFI = 12/64 ≈ 19 %`).
 
 ---
 
@@ -59,12 +59,13 @@ Peak sustained rate ≈ `1 / L` txn/cycle for a workload with average latency `L
 
 | Choice | Benefit | Cost |
 |--------|---------|------|
-| Leave page open (no auto-PRE) | Hit reuse; multi-bank locality | Row conflicts need PRE+ACT; more open-page state |
-| Refresh over new req at IDLE | Simple, predictable | Adds latency bubbles; no bank-smart REF |
-| Depth-4 queue + bank-parallel waits | Hide per-bank latency; multi-outstanding host | Still 1 cmd/cycle; in-order rsp; 1 RD pipe |
-| Shadow open-row in `mem_ctrl` | Schedule without model peek | Must stay consistent with `dram_model` |
+| Leave page open (no auto-PRE) | Hit reuse; multi-bank locality | Row conflicts need PRE+ACT |
+| Drain-then-REF | Simple, predictable | Latency bubble; REF closes every open row |
+| Depth-4 queue + bank engines | Hides per-bank waits; multi-outstanding host | +2–3 cycles on an isolated request; 1 cmd/cycle; 1 RD pipe |
+| In-order responses via tags | Simple host contract | Early finishers wait in a 16 × 32b buffer (about half of all flops) |
+| Shadow open-row in `mem_ctrl` | Schedule without peeking at the model | Must stay consistent with `dram_model` |
 
-**Next levers (not in v1):** cmd queue + bank scoreboard, prefer hit over miss, auto-PRE policy, overlapping REF with other-bank traffic.
+**Next levers:** issue on the wait-exit cycle (−1 cycle per `tRCD` / `tRP`), hit-first dispatch, auto-PRE policy, overlap REF with other-bank traffic, shrink the response buffer together with the in-flight cap.
 
 ---
 
@@ -74,6 +75,6 @@ Peak sustained rate ≈ `1 / L` txn/cycle for a workload with average latency `L
 
 1. Page hit WR→RD  
 2. Same-bank page miss (row change); both rows’ data OK  
-3. Multi-bank open; bank0 conflict while bank1 stays open  
-
-No cycle-accurate scoreboard yet — latencies above are **FSM-derived**. Optional follow-up: cycle counters in TB around `host_read`/`host_write`.
+3. Multi-bank; bank0 conflict while bank1 stays open  
+4. 4-bank write burst; ≥ 2 bank engines busy at once (observed 4)  
+5. Response back-pressure: 20 reads with `rsp_ready` low, all returned in order  

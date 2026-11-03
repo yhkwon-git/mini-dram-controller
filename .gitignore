@@ -22,13 +22,15 @@ results.xml
 # Editor / OS
 .DS_Store
 Thumbs.db
+desktop.ini
 *.swp
 *~
 .vscode/
 .idea/
 
+# Office lock files (e.g. while the portfolio PPTX is open)
+~$*
+
 # Yosys / synth (optional later)
-*.json
-*.blif
-*.dot
 synth_out/
+*.blif

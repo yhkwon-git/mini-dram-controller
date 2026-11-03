@@ -1,20 +1,21 @@
 """
-Optional cocotb smoke (when cocotb + Verilator available under WSL/Linux).
+cocotb smoke test for mem_ctrl_top — an optional path next to the SV testbench.
 
-    make sim-cocotb
+    make sim-cocotb        # needs cocotb >= 2.0 and Verilator
 
-Functional host RD/WR coverage is TODO until the scheduler is implemented.
+Functional coverage (hit / miss / multi-bank / burst / back-pressure) lives in
+tb/tb_mem_ctrl.sv and runs with `make sim`.
 """
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import RisingEdge, ClockCycles
+from cocotb.triggers import ClockCycles
 
 
 @cocotb.test()
 async def test_reset_idle(dut):
-    """Reset then idle for a few cycles — compile/run smoke only."""
-    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    """After reset the controller is ready, no response is pending, banks are closed."""
+    Clock(dut.clk, 10, unit="ns").start()
 
     dut.rst_n.value = 0
     dut.req_valid.value = 0
@@ -27,5 +28,6 @@ async def test_reset_idle(dut):
     dut.rst_n.value = 1
     await ClockCycles(dut.clk, 20)
 
-    assert int(dut.rst_n.value) == 1
-    dut._log.info("cocotb smoke OK — idle complete (functional tests TODO)")
+    assert dut.req_ready.value == 1, "req_ready should be 1 after reset"
+    assert dut.rsp_valid.value == 0, "no response may be pending after reset"
+    assert dut.dram_bank_open.value == 0, "all banks start closed"

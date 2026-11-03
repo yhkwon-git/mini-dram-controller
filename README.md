@@ -1,25 +1,18 @@
 # Mini DRAM Controller
 
-SystemVerilog로 설계한 DRAM 메모리 컨트롤러 — **Request Queue + Bank-Parallel Scheduler**, 자체 Timing 모델 기반 Spec · RTL · 검증 · 성능/PPA 분석
+## 📄 포트폴리오 PDF
 
-> **포트폴리오 PDF (21쪽): [MiniDramController_Portfolio.pdf](portfolio-deck/MiniDramController_Portfolio.pdf)**  
-> SK hynix · HBM Digital Design (RTL Design) 지원 · **권용현** · 010-6408-8646 · kyongh0331@naver.com
+**[포트폴리오 PDF 보기 (21쪽)](portfolio-deck/MiniDramController_Portfolio.pdf)** · [PPTX](portfolio-deck/MiniDramController_Portfolio.pptx)
 
-[![포트폴리오 미리보기 — 클릭하면 PDF가 열립니다](portfolio-deck/preview.jpg)](portfolio-deck/MiniDramController_Portfolio.pdf)
+SK hynix HBM Digital Design (RTL Design) 지원 · 권용현
 
-| 항목 | 결과 |
-|------|------|
-| 4-Bank Write Burst | 첫 Accept → 마지막 Response **35 → 17클럭 (2.06×)**, v0 단일 FSM 대비 |
-| Timing Rule 7종 (VCD Checker) | tRCD · tRP · tRAS · tRC · tWR · tCL · tRFC **Violation 0** |
-| Coverage (Verilator, `mem_ctrl`) | Line 94.3% · Branch 91.9% |
-| Debug | Response Back-pressure 시 4-bit Tag Wrap-around 재현 → 수정 + Regression TB |
-| PPA (Nangate45 typical, 참고값) | Area 9,819 µm² · reg2reg 2.642 ns (≈373 MHz) |
+[![포트폴리오 표지. 클릭하면 PDF가 열립니다](portfolio-deck/cover.png)](portfolio-deck/MiniDramController_Portfolio.pdf)
 
-PDF가 브라우저에서 열리지 않으면 [다운로드](https://github.com/yhkwon-git/mini-dram-controller/raw/main/portfolio-deck/MiniDramController_Portfolio.pdf) · 원본 [PPTX](portfolio-deck/MiniDramController_Portfolio.pptx)
-
-<sub>덱의 측정값과 코드 줄 번호는 commit `6049e5a` 기준입니다. 이후 Tag Wrap-around 수정(`fa08330`), Back-pressure Regression TB(`7e2d4b5`), 문서 갱신(`d3061ca`)을 반영했습니다.</sub>
+PDF의 파형, 커버리지, 합성 수치와 코드 줄 번호는 커밋 `6049e5a` 기준이다. 그 뒤 커밋은 PDF 19쪽의 재검증 항목 A, C를 RTL과 테스트벤치에 반영했고(`fa08330`, `7e2d4b5`), 회귀는 5개 시나리오 모두 PASS다.
 
 ---
+
+SystemVerilog로 만든 미니 DRAM 메모리 컨트롤러다. 요청 큐와 뱅크 병렬 스케줄러를 자체 타이밍 모델 위에서 설계하고, 스펙 · RTL · 검증 · 성능/PPA를 분석한다.
 
 ## Overview / 구성
 

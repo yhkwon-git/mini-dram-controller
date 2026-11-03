@@ -1,4 +1,4 @@
-// Directed tests: hit/miss/multi-bank + queued multi-bank parallel accepts.
+// Directed tests: hit/miss/multi-bank, 4-bank burst, response back-pressure.
 `timescale 1ns/1ps
 
 module tb_mem_ctrl
@@ -19,7 +19,8 @@ module tb_mem_ctrl
 
   int unsigned errs;
   int unsigned access_err_count;
-  int unsigned max_bank_active; // coarse: how many banks non-idle observed via open mask during queue test
+  int unsigned ref_count;          // CMD_REF issued to the model
+  int unsigned max_engines_active; // scenario 4: bank engines outside ST_IDLE at once
 
   mem_ctrl_top dut (
     .clk(clk),
@@ -41,11 +42,22 @@ module tb_mem_ctrl
   initial clk = 1'b0;
   always #5 clk = ~clk;
 
+`ifdef WAVES
+  // make sim WAVES=1 -> tb_mem_ctrl.vcd in the directory make runs from
+  initial begin
+    $dumpfile("tb_mem_ctrl.vcd");
+    $dumpvars(0, tb_mem_ctrl);
+  end
+`endif
+
   always_ff @(posedge clk) begin
-    if (!rst_n)
+    if (!rst_n) begin
       access_err_count <= 0;
-    else if (dram_access_err)
-      access_err_count <= access_err_count + 1;
+      ref_count        <= 0;
+    end else begin
+      if (dram_access_err)      access_err_count <= access_err_count + 1;
+      if (dut.d_cmd == CMD_REF) ref_count        <= ref_count + 1;
+    end
   end
 
   // Cheap assertions
@@ -64,13 +76,24 @@ module tb_mem_ctrl
     return {b, r, c};
   endfunction
 
-  task automatic host_accept_write(
+  // White-box probe: how many bank engines are busy right now.
+  function automatic int unsigned engines_active();
+    engines_active = 0;
+    if (dut.u_ctrl.b_state[0] != ST_IDLE) engines_active++;
+    if (dut.u_ctrl.b_state[1] != ST_IDLE) engines_active++;
+    if (dut.u_ctrl.b_state[2] != ST_IDLE) engines_active++;
+    if (dut.u_ctrl.b_state[3] != ST_IDLE) engines_active++;
+  endfunction
+
+  // Drive one request and return once it is accepted (no wait for the response).
+  task automatic host_accept(
+    input logic                 write,
     input logic [ADDR_BITS-1:0] addr,
     input logic [DATA_BITS-1:0] data
   );
     @(negedge clk);
     req_valid = 1'b1;
-    req_write = 1'b1;
+    req_write = write;
     req_addr  = addr;
     req_wdata = data;
     @(posedge clk);
@@ -78,6 +101,13 @@ module tb_mem_ctrl
       @(posedge clk);
     @(negedge clk);
     req_valid = 1'b0;
+  endtask
+
+  task automatic host_accept_write(
+    input logic [ADDR_BITS-1:0] addr,
+    input logic [DATA_BITS-1:0] data
+  );
+    host_accept(1'b1, addr, data);
   endtask
 
   task automatic host_wait_rsp();
@@ -99,16 +129,7 @@ module tb_mem_ctrl
     input  logic [ADDR_BITS-1:0] addr,
     output logic [DATA_BITS-1:0] data
   );
-    @(negedge clk);
-    req_valid = 1'b1;
-    req_write = 1'b0;
-    req_addr  = addr;
-    req_wdata = '0;
-    @(posedge clk);
-    while (req_ready !== 1'b1)
-      @(posedge clk);
-    @(negedge clk);
-    req_valid = 1'b0;
+    host_accept(1'b0, addr, '0);
     @(posedge clk);
     while (rsp_valid !== 1'b1)
       @(posedge clk);
@@ -131,18 +152,23 @@ module tb_mem_ctrl
   logic [DATA_BITS-1:0] rdata;
   logic [ADDR_BITS-1:0] a_b0_r1, a_b0_r2, a_b1_r3, a_b0_r4;
   logic [ADDR_BITS-1:0] a_b2, a_b3;
-  int unsigned open_pop;
+
+  // Scenario 5: more reads than response tags (16) while rsp_ready is low
+  localparam int BP_N    = 20;
+  localparam int BP_HOLD = 150;  // cycles with rsp_ready = 0
+  logic [ADDR_BITS-1:0] bp_addr [BP_N];
+  logic [DATA_BITS-1:0] bp_data [BP_N];
+  int unsigned          bp_got, bp_bad, bp_ref0;
 
   initial begin
-    errs             = 0;
-    access_err_count = 0;
-    max_bank_active  = 0;
-    rst_n            = 1'b0;
-    req_valid        = 1'b0;
-    req_write        = 1'b0;
-    req_addr         = '0;
-    req_wdata        = '0;
-    rsp_ready        = 1'b1;
+    errs               = 0;
+    max_engines_active = 0;
+    rst_n              = 1'b0;
+    req_valid          = 1'b0;
+    req_write          = 1'b0;
+    req_addr           = '0;
+    req_wdata          = '0;
+    rsp_ready          = 1'b1;
 
     repeat (4) @(posedge clk);
     rst_n = 1'b1;
@@ -178,16 +204,16 @@ module tb_mem_ctrl
     check_eq("bank1 survived", rdata, 32'hC0DE_0001);
 
     // ------------------------------------------------------------------
-    $display("[TB] === SCENARIO 4: queue depth — burst accept 4 banks ===");
-    // Keep rsp_ready=1 so completions drain; verify via subsequent RDs.
-    // Accept as fast as req_ready allows (queue absorbs; banks run in parallel).
+    $display("[TB] === SCENARIO 4: 4-bank write burst (bank engines in parallel) ===");
+    // Accept back to back without waiting for responses (rsp_ready=1 drains
+    // them). Open-page banks stay open after a serial schedule too, so the
+    // check counts bank engines that are busy at the same time instead.
     fork
       begin : observe
         repeat (60) begin
           @(posedge clk);
-          open_pop = int'(dram_bank_open[0]) + int'(dram_bank_open[1]) +
-                     int'(dram_bank_open[2]) + int'(dram_bank_open[3]);
-          if (open_pop > max_bank_active) max_bank_active = open_pop;
+          if (engines_active() > max_engines_active)
+            max_engines_active = engines_active();
         end
       end
       begin : burst
@@ -199,9 +225,9 @@ module tb_mem_ctrl
     join
     // Drain any remaining write responses
     repeat (80) @(posedge clk);
-    $display("[TB] peak banks open during burst=%0d", max_bank_active);
-    if (max_bank_active < 2) begin
-      $error("[TB] expected >=2 banks open during parallel burst");
+    $display("[TB] peak bank engines active at once=%0d", max_engines_active);
+    if (max_engines_active < 2) begin
+      $error("[TB] expected >=2 bank engines active at once during the burst");
       errs++;
     end
     host_read(make_addr(2'd0, 8'h10, 4'h0), rdata);
@@ -213,6 +239,61 @@ module tb_mem_ctrl
     host_read(a_b3, rdata);
     check_eq("q bank3", rdata, 32'h4000_0000);
 
+    // ------------------------------------------------------------------
+    $display("[TB] === SCENARIO 5: response back-pressure (%0d reads, rsp_ready low %0d cycles) ===",
+             BP_N, BP_HOLD);
+    // More reads than response tags are in flight: the controller has to stop
+    // accepting instead of reusing a tag whose response is still buffered.
+    for (int i = 0; i < BP_N; i++) begin
+      bp_addr[i] = make_addr(i[1:0], 8'h80 + 8'(i / NUM_BANKS), 4'(i));
+      bp_data[i] = 32'h5000_0000 + 32'(i);
+      host_write(bp_addr[i], bp_data[i]);
+    end
+    bp_got  = 0;
+    bp_bad  = 0;
+    bp_ref0 = ref_count;
+    @(negedge clk);
+    rsp_ready = 1'b0;
+    fork
+      begin : bp_issue
+        for (int i = 0; i < BP_N; i++)
+          host_accept(1'b0, bp_addr[i], '0);
+      end
+      begin : bp_drain
+        repeat (BP_HOLD) @(posedge clk);
+        @(negedge clk);
+        rsp_ready = 1'b1;
+        for (int cyc = 0; cyc < 1000 && bp_got < BP_N; cyc++) begin
+          @(posedge clk);
+          if (rsp_valid === 1'b1) begin
+            if (rsp_rdata !== bp_data[bp_got]) begin
+              $error("[TB] bp rd%0d mismatch got=0x%08h exp=0x%08h",
+                     bp_got, rsp_rdata, bp_data[bp_got]);
+              bp_bad++;
+            end
+            bp_got++;
+          end
+        end
+      end
+    join
+    repeat (40) @(posedge clk);
+    if (rsp_valid === 1'b1) begin
+      $error("[TB] bp: unexpected extra response");
+      bp_bad++;
+    end
+    if (bp_got != BP_N) begin
+      $error("[TB] bp: got %0d of %0d responses", bp_got, BP_N);
+      bp_bad++;
+    end
+    if (ref_count == bp_ref0) begin
+      $error("[TB] bp: no refresh during the back-pressure test");
+      bp_bad++;
+    end
+    if (bp_bad == 0)
+      $display("[TB] back-pressure OK (%0d/%0d in order, %0d REF during the test)",
+               bp_got, BP_N, ref_count - bp_ref0);
+    errs += bp_bad;
+
     repeat (4) @(posedge clk);
 
     if (access_err_count != 0) begin
@@ -221,11 +302,14 @@ module tb_mem_ctrl
     end else
       $display("[TB] access_err count=0 OK");
 
-    // Silence unused
-    if (dram_page_hit !== 1'b0 && dram_page_hit !== 1'b1) errs++;
+    // Model observability outputs must not be X/Z at the end of the run
+    if ($isunknown({dram_page_hit, dram_bank_open})) begin
+      $error("[TB] X/Z on model observability outputs");
+      errs++;
+    end
 
     if (errs == 0)
-      $display("[TB] PASS — hit/miss/multi-bank/queue-parallel OK");
+      $display("[TB] PASS — hit/miss/multi-bank/burst/back-pressure OK");
     else
       $error("[TB] FAIL — %0d error(s)", errs);
 

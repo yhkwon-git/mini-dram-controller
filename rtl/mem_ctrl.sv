@@ -110,7 +110,10 @@ module mem_ctrl
       end
     end
 
-    req_ready = free_found && !ref_due && !ref_active;
+    // rsp_done/rsp_data are indexed by tag, so tag_alloc must never lap
+    // tag_retire: stop accepting while 15 requests are in flight.
+    req_ready = free_found && !ref_due && !ref_active &&
+                (TAG_BITS'(tag_alloc + 1'b1) != tag_retire);
     q_push    = req_valid && req_ready;
 
     // Prefer oldest tag among ready-to-dispatch entries

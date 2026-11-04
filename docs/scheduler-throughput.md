@@ -51,7 +51,7 @@ Write hits do not occur in the TB.
 
 During the burst a command goes out every cycle for 8 cycles — with 4 banks the single command slot, not bank timing, becomes the limit.
 
-**Refresh tax:** requests are blocked while REF is due or active (drain + `tRFC`). Measured over the TB run: 18.3 % of cycles (estimate `tRFC / tREFI = 12/64 ≈ 19 %`).
+**Refresh tax:** requests are blocked while REF is due or active. Each REF blocks `tRFC + 2` = 14 cycles plus the drain before it, so with no drain the share is 14 / (64 + 14) ≈ 18 %. Measured on `make sim` (all five scenarios): 194 of 834 cycles after reset = **23.3 %**, over 10 REFs. Most drains take 0–8 cycles; one takes 26 cycles during scenario 5, where back-pressured reads go out one per 4 cycles on the single read pipe. The earlier 18.3 % figure came from the four-scenario TB (commit `6049e5a` measures 18.2 %).
 
 ---
 

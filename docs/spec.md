@@ -42,6 +42,8 @@ Own model values (cycles). Tunable in `dram_pkg`.
 | `tWR` | 2 | last WR → PRE (write recovery) |
 | `tREFI` | 64 | refresh opportunity period (host clocks) |
 
+`tCL` counts from the edge where the model samples RD to the edge that registers `data_valid`. On a waveform `data_valid` is therefore high in the third cycle after the RD cycle (`tCL + 1`). The measured latencies in `docs/scheduler-throughput.md` include that cycle.
+
 **Per-bank tracking in `dram_model`:** open/closed + open row → page **hit** (same bank & row open) vs **miss** (closed or wrong row).
 
 ---

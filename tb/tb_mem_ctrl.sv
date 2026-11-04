@@ -1,4 +1,8 @@
 // Directed tests: hit/miss/multi-bank, 4-bank burst, response back-pressure.
+// A failed check prints "[TB] ERROR ..." and the run continues; the end of the
+// run prints the summary and calls $fatal, so any simulator exits non-zero.
+// ($error would stop Verilator at the first failure, before the summary, and
+// $error + $finish exits 0 on simulators that do not stop on $error.)
 `timescale 1ns/1ps
 
 module tb_mem_ctrl
@@ -19,6 +23,7 @@ module tb_mem_ctrl
 
   int unsigned errs;
   int unsigned access_err_count;
+  int unsigned rsp_err_count;      // rsp_err pulses on accepted responses (v1: must stay 0)
   int unsigned ref_count;          // CMD_REF issued to the model
   int unsigned max_engines_active; // scenario 4: bank engines outside ST_IDLE at once
 
@@ -53,18 +58,12 @@ module tb_mem_ctrl
   always_ff @(posedge clk) begin
     if (!rst_n) begin
       access_err_count <= 0;
+      rsp_err_count    <= 0;
       ref_count        <= 0;
     end else begin
-      if (dram_access_err)      access_err_count <= access_err_count + 1;
-      if (dut.d_cmd == CMD_REF) ref_count        <= ref_count + 1;
-    end
-  end
-
-  // Cheap assertions
-  always_ff @(posedge clk) begin
-    if (rst_n) begin
-      if (rsp_valid && rsp_err)
-        $error("[TB] unexpected rsp_err");
+      if (dram_access_err)                    access_err_count <= access_err_count + 1;
+      if (rsp_valid && rsp_ready && rsp_err)  rsp_err_count    <= rsp_err_count + 1;
+      if (dut.d_cmd == CMD_REF)               ref_count        <= ref_count + 1;
     end
   end
 
@@ -143,7 +142,7 @@ module tb_mem_ctrl
     input logic [DATA_BITS-1:0] exp
   );
     if (got !== exp) begin
-      $error("[TB] %s mismatch got=0x%08h exp=0x%08h", tag, got, exp);
+      $display("[TB] ERROR %s mismatch got=0x%08h exp=0x%08h", tag, got, exp);
       errs++;
     end else
       $display("[TB] %s OK (0x%08h)", tag, got);
@@ -227,7 +226,7 @@ module tb_mem_ctrl
     repeat (80) @(posedge clk);
     $display("[TB] peak bank engines active at once=%0d", max_engines_active);
     if (max_engines_active < 2) begin
-      $error("[TB] expected >=2 bank engines active at once during the burst");
+      $display("[TB] ERROR expected >=2 bank engines active at once during the burst");
       errs++;
     end
     host_read(make_addr(2'd0, 8'h10, 4'h0), rdata);
@@ -267,8 +266,8 @@ module tb_mem_ctrl
           @(posedge clk);
           if (rsp_valid === 1'b1) begin
             if (rsp_rdata !== bp_data[bp_got]) begin
-              $error("[TB] bp rd%0d mismatch got=0x%08h exp=0x%08h",
-                     bp_got, rsp_rdata, bp_data[bp_got]);
+              $display("[TB] ERROR bp rd%0d mismatch got=0x%08h exp=0x%08h",
+                       bp_got, rsp_rdata, bp_data[bp_got]);
               bp_bad++;
             end
             bp_got++;
@@ -278,15 +277,15 @@ module tb_mem_ctrl
     join
     repeat (40) @(posedge clk);
     if (rsp_valid === 1'b1) begin
-      $error("[TB] bp: unexpected extra response");
+      $display("[TB] ERROR bp: unexpected extra response");
       bp_bad++;
     end
     if (bp_got != BP_N) begin
-      $error("[TB] bp: got %0d of %0d responses", bp_got, BP_N);
+      $display("[TB] ERROR bp: got %0d of %0d responses", bp_got, BP_N);
       bp_bad++;
     end
     if (ref_count == bp_ref0) begin
-      $error("[TB] bp: no refresh during the back-pressure test");
+      $display("[TB] ERROR bp: no refresh during the back-pressure test");
       bp_bad++;
     end
     if (bp_bad == 0)
@@ -297,29 +296,34 @@ module tb_mem_ctrl
     repeat (4) @(posedge clk);
 
     if (access_err_count != 0) begin
-      $error("[TB] access_err count=%0d", access_err_count);
+      $display("[TB] ERROR access_err count=%0d", access_err_count);
       errs++;
     end else
       $display("[TB] access_err count=0 OK");
 
+    if (rsp_err_count != 0) begin
+      $display("[TB] ERROR rsp_err count=%0d", rsp_err_count);
+      errs++;
+    end else
+      $display("[TB] rsp_err count=0 OK");
+
     // Model observability outputs must not be X/Z at the end of the run
     if ($isunknown({dram_page_hit, dram_bank_open})) begin
-      $error("[TB] X/Z on model observability outputs");
+      $display("[TB] ERROR X/Z on model observability outputs");
       errs++;
     end
 
-    if (errs == 0)
+    if (errs == 0) begin
       $display("[TB] PASS — hit/miss/multi-bank/burst/back-pressure OK");
-    else
-      $error("[TB] FAIL — %0d error(s)", errs);
-
-    $finish;
+      $finish;
+    end else begin
+      $fatal(1, "[TB] FAIL — %0d error(s)", errs);
+    end
   end
 
   initial begin
     #1_000_000;
-    $error("[TB] timeout");
-    $finish;
+    $fatal(1, "[TB] timeout");
   end
 
 endmodule

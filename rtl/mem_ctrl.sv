@@ -349,10 +349,8 @@ module mem_ctrl
     end
   end
 
-  logic unused_page_hit;
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) unused_page_hit <= 1'b0;
-    else        unused_page_hit <= dram_page_hit;
-  end
+  // dram_page_hit is observability only. Verilator skips *unused* names in its
+  // UNUSED check, so a wire is enough; the old flop here only silenced lint.
+  wire unused_page_hit = dram_page_hit;
 
 endmodule

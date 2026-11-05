@@ -1,10 +1,25 @@
-// Mini memory controller — depth-4 request queue + per-bank parallel timing.
-// One DRAM command per cycle; bank timers advance concurrently (docs/spec.md).
+// Mini memory controller v2: request queue + command-level scheduler.
+//
+//   mc_queue    accepted requests until their RD/WR is issued
+//   mc_bank x4  open row and same-bank timing (tRCD tRP tRAS tRC tRTP tWR)
+//   mc_chan     channel timing (tCCD tRRD tFAW tWTR tRTW tRFC)
+//   mc_refresh  one REF owed per tREFI, paid back when idle or when urgent
+//   mc_sched    one DRAM command per cycle (FR-FCFS or FCFS)
+//   mc_resp     tags, read-return FIFO, write-data pipeline, in-order responses
+//
+// The DRAM side is DFI-like: commands with fixed data latencies (RL, WL) and
+// no busy signal; the controller tracks every timing rule itself.
 `timescale 1ns/1ps
 
 module mem_ctrl
   import dram_pkg::*;
-(
+#(
+  parameter int DEPTH        = QUEUE_DEPTH,
+  parameter bit FR_FCFS      = 1'b1,  // 0 = oldest ready command first
+  parameter int RD_PIPE      = 4,     // RDs in flight on the DRAM bus (v1: 1)
+  parameter int STARVE_LIMIT = 160,   // cycles before the oldest request overrides row hits
+  parameter int REF_URGENT   = 4      // owed REFs that stop new traffic
+) (
   input  logic                 clk,
   input  logic                 rst_n,
 
@@ -20,337 +35,164 @@ module mem_ctrl
   output logic                 rsp_err,
 
   output dram_cmd_e            dram_cmd,
-  output logic [$clog2(NUM_BANKS)-1:0] dram_bank,
+  output logic [BANK_BITS-1:0] dram_bank,
   output logic [ROW_BITS-1:0]  dram_row,
   output logic [COL_BITS-1:0]  dram_col,
+  output logic                 dram_wdata_en,
   output logic [DATA_BITS-1:0] dram_wdata,
-
-  input  logic                 dram_busy,
   input  logic                 dram_data_valid,
-  input  logic [DATA_BITS-1:0] dram_rdata,
-  input  logic                 dram_page_hit
+  input  logic [DATA_BITS-1:0] dram_rdata
 );
 
-  localparam int TAG_BITS = 4;
-  localparam int TAG_N    = 1 << TAG_BITS;
+  localparam int AW = $clog2(DEPTH);
 
-  // -------------------------------------------------------------------------
-  // Request queue slots (valid-bit CAM-style; bank-aware dispatch)
-  // -------------------------------------------------------------------------
-  logic                 q_valid [QUEUE_DEPTH];
-  logic [ADDR_BITS-1:0] q_addr  [QUEUE_DEPTH];
-  logic [DATA_BITS-1:0] q_wdata [QUEUE_DEPTH];
-  logic                 q_write [QUEUE_DEPTH];
-  logic [TAG_BITS-1:0]  q_tag   [QUEUE_DEPTH];
-  logic [QUEUE_AW:0]    q_count;
-  logic [QUEUE_AW-1:0]  free_slot;
-  logic                 free_found;
+  logic                            acc;
+  logic                            q_has_free;
+  logic [DEPTH-1:0]                q_valid, q_write;
+  logic [DEPTH-1:0][BANK_BITS-1:0] q_bank;
+  logic [DEPTH-1:0][ROW_BITS-1:0]  q_row;
+  logic [DEPTH-1:0][COL_BITS-1:0]  q_col;
+  logic [DEPTH-1:0][DATA_BITS-1:0] q_wdata;
+  logic [DEPTH-1:0][TAG_BITS-1:0]  q_tag;
+  logic [DEPTH-1:0][7:0]           q_wait;
 
-  logic [TAG_BITS-1:0]  tag_alloc, tag_retire;
-  logic                 rsp_done [TAG_N];
-  logic [DATA_BITS-1:0] rsp_data [TAG_N];
+  logic [TAG_BITS-1:0]             tag_alloc, tag_retire;
+  logic                            tag_free, rd_slot_ok;
 
-  ctrl_state_e               b_state [NUM_BANKS];
-  logic [ADDR_BITS-1:0]      b_addr  [NUM_BANKS];
-  logic [DATA_BITS-1:0]      b_wdata [NUM_BANKS];
-  logic                      b_write [NUM_BANKS];
-  logic [TAG_BITS-1:0]       b_tag   [NUM_BANKS];
-  logic [7:0]                b_timer [NUM_BANKS];
-  logic                      b_need_act [NUM_BANKS];
+  logic [NUM_BANKS-1:0]                bank_open, bank_act_ok, bank_col_ok, bank_pre_ok;
+  logic [NUM_BANKS-1:0][ROW_BITS-1:0]  bank_row;
+  logic                                chan_act_ok, chan_rd_ok, chan_wr_ok, chan_any_ok;
+  logic                                ref_hold;
+  logic [3:0]                          ref_owed;
 
-  logic                      bank_open [NUM_BANKS];
-  logic [ROW_BITS-1:0]       bank_row  [NUM_BANKS];
-  logic [$clog2(tRAS+1)-1:0] ras_rem   [NUM_BANKS];
-  logic [$clog2(tRC+1)-1:0]  rc_rem    [NUM_BANKS];
+  dram_cmd_e                       cmd;
+  logic [BANK_BITS-1:0]            cmd_bank;
+  logic [ROW_BITS-1:0]             cmd_row;
+  logic [COL_BITS-1:0]             cmd_col;
+  logic                            serve;
+  logic [AW-1:0]                   serve_idx;
 
-  logic [$clog2(tREFI+1)-1:0] refi_cnt;
-  logic                       ref_active, ref_issue, ref_due, all_banks_idle;
+  assign req_ready = q_has_free && tag_free;
+  assign acc       = req_valid && req_ready;
+  assign rsp_err   = 1'b0;
 
-  logic                       rd_inflight;
-  logic [$clog2(NUM_BANKS)-1:0] rd_bank_q;
+  mc_queue #(.DEPTH(DEPTH)) u_queue (
+    .clk        (clk),
+    .rst_n      (rst_n),
+    .push       (acc),
+    .push_write (req_write),
+    .push_addr  (req_addr),
+    .push_wdata (req_wdata),
+    .push_tag   (tag_alloc),
+    .has_free   (q_has_free),
+    .pop        (serve),
+    .pop_idx    (serve_idx),
+    .q_valid    (q_valid),
+    .q_write    (q_write),
+    .q_bank     (q_bank),
+    .q_row      (q_row),
+    .q_col      (q_col),
+    .q_wdata    (q_wdata),
+    .q_tag      (q_tag),
+    .q_wait     (q_wait)
+  );
 
-  logic want_pre [NUM_BANKS], want_act [NUM_BANKS], want_rd [NUM_BANKS], want_wr [NUM_BANKS];
-  logic [$clog2(NUM_BANKS)-1:0] rr_ptr, win_bank;
-  logic                       win_valid;
-  dram_cmd_e                  win_cmd;
-
-  logic                       disp_valid;
-  logic [$clog2(NUM_BANKS)-1:0] disp_bank;
-  logic [QUEUE_AW-1:0]        disp_slot;
-  logic                       q_push;
-
-  integer bi;
-
-  always_comb begin
-    all_banks_idle = 1'b1;
-    for (bi = 0; bi < NUM_BANKS; bi++) begin
-      want_pre[bi] = 1'b0;
-      want_act[bi] = 1'b0;
-      want_rd[bi]  = 1'b0;
-      want_wr[bi]  = 1'b0;
-      if (b_state[bi] != ST_IDLE) all_banks_idle = 1'b0;
-      case (b_state[bi])
-        ST_PRE: want_pre[bi] = (ras_rem[bi] == 0);
-        ST_ACT: want_act[bi] = (rc_rem[bi] == 0);
-        ST_RD:  want_rd[bi]  = 1'b1;
-        ST_WR:  want_wr[bi]  = 1'b1;
-        default: ;
-      endcase
-    end
-
-    ref_due   = (refi_cnt == 0);
-    ref_issue = ref_due && !ref_active && all_banks_idle && (q_count == 0) && !dram_busy;
-
-    free_found = 1'b0;
-    free_slot  = '0;
-    for (bi = 0; bi < QUEUE_DEPTH; bi++) begin
-      if (!q_valid[bi] && !free_found) begin
-        free_found = 1'b1;
-        free_slot  = bi[QUEUE_AW-1:0];
-      end
-    end
-
-    // rsp_done/rsp_data are indexed by tag, so tag_alloc must never lap
-    // tag_retire: stop accepting while 15 requests are in flight.
-    req_ready = free_found && !ref_due && !ref_active &&
-                (TAG_BITS'(tag_alloc + 1'b1) != tag_retire);
-    q_push    = req_valid && req_ready;
-
-    // Prefer oldest tag among ready-to-dispatch entries
-    disp_valid = 1'b0;
-    disp_bank  = '0;
-    disp_slot  = '0;
-    if (!ref_active && !ref_issue) begin
-      for (bi = 0; bi < QUEUE_DEPTH; bi++) begin
-        if (q_valid[bi] && (b_state[addr_bank(q_addr[bi])] == ST_IDLE)) begin
-          if (!disp_valid || (q_tag[bi] - tag_retire) < (q_tag[disp_slot] - tag_retire)) begin
-            disp_valid = 1'b1;
-            disp_bank  = addr_bank(q_addr[bi]);
-            disp_slot  = bi[QUEUE_AW-1:0];
-          end
-        end
-      end
-    end
-
-    win_valid = 1'b0;
-    win_bank  = '0;
-    win_cmd   = CMD_NOP;
-    if (!dram_busy && !ref_active && !ref_issue) begin
-      for (bi = 0; bi < NUM_BANKS; bi++) begin
-        automatic int b = (int'(rr_ptr) + bi) % NUM_BANKS;
-        if (!win_valid && want_pre[b]) begin
-          win_valid = 1'b1; win_bank = b[$clog2(NUM_BANKS)-1:0]; win_cmd = CMD_PRE;
-        end
-      end
-      for (bi = 0; bi < NUM_BANKS; bi++) begin
-        automatic int b = (int'(rr_ptr) + bi) % NUM_BANKS;
-        if (!win_valid && want_act[b]) begin
-          win_valid = 1'b1; win_bank = b[$clog2(NUM_BANKS)-1:0]; win_cmd = CMD_ACT;
-        end
-      end
-      for (bi = 0; bi < NUM_BANKS; bi++) begin
-        automatic int b = (int'(rr_ptr) + bi) % NUM_BANKS;
-        if (!win_valid && want_wr[b]) begin
-          win_valid = 1'b1; win_bank = b[$clog2(NUM_BANKS)-1:0]; win_cmd = CMD_WR;
-        end
-      end
-      for (bi = 0; bi < NUM_BANKS; bi++) begin
-        automatic int b = (int'(rr_ptr) + bi) % NUM_BANKS;
-        if (!win_valid && want_rd[b] && !rd_inflight) begin
-          win_valid = 1'b1; win_bank = b[$clog2(NUM_BANKS)-1:0]; win_cmd = CMD_RD;
-        end
-      end
-    end
-
-    dram_cmd   = CMD_NOP;
-    dram_bank  = '0;
-    dram_row   = '0;
-    dram_col   = '0;
-    dram_wdata = '0;
-    if (ref_issue) begin
-      dram_cmd = CMD_REF;
-    end else if (win_valid) begin
-      dram_cmd   = win_cmd;
-      dram_bank  = win_bank;
-      dram_row   = addr_row(b_addr[win_bank]);
-      dram_col   = addr_col(b_addr[win_bank]);
-      dram_wdata = b_wdata[win_bank];
-    end
-
-    rsp_err   = 1'b0;
-    rsp_valid = rsp_done[tag_retire];
-    rsp_rdata = rsp_data[tag_retire];
+  for (genvar b = 0; b < NUM_BANKS; b++) begin : g_bank
+    logic here;
+    assign here = (cmd_bank == BANK_BITS'(b));
+    mc_bank u_bank (
+      .clk      (clk),
+      .rst_n    (rst_n),
+      .do_act   (cmd == CMD_ACT && here),
+      .do_pre   ((cmd == CMD_PRE && here) || (cmd == CMD_PREA && bank_open[b])),
+      .do_rd    (cmd == CMD_RD && here),
+      .do_wr    (cmd == CMD_WR && here),
+      .act_row  (cmd_row),
+      .is_open  (bank_open[b]),
+      .open_row (bank_row[b]),
+      .act_ok   (bank_act_ok[b]),
+      .col_ok   (bank_col_ok[b]),
+      .pre_ok   (bank_pre_ok[b])
+    );
   end
 
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-      q_count     <= '0;
-      tag_alloc   <= '0;
-      tag_retire  <= '0;
-      refi_cnt    <= tREFI[$bits(refi_cnt)-1:0];
-      ref_active  <= 1'b0;
-      rr_ptr      <= '0;
-      rd_inflight <= 1'b0;
-      rd_bank_q   <= '0;
-      for (int i = 0; i < QUEUE_DEPTH; i++) begin
-        q_valid[i] <= 1'b0;
-        q_addr[i]  <= '0;
-        q_wdata[i] <= '0;
-        q_write[i] <= 1'b0;
-        q_tag[i]   <= '0;
-      end
-      for (int i = 0; i < TAG_N; i++) begin
-        rsp_done[i] <= 1'b0;
-        rsp_data[i] <= '0;
-      end
-      for (int i = 0; i < NUM_BANKS; i++) begin
-        b_state[i]    <= ST_IDLE;
-        b_addr[i]     <= '0;
-        b_wdata[i]    <= '0;
-        b_write[i]    <= 1'b0;
-        b_tag[i]      <= '0;
-        b_timer[i]    <= '0;
-        b_need_act[i] <= 1'b0;
-        bank_open[i]  <= 1'b0;
-        bank_row[i]   <= '0;
-        ras_rem[i]    <= '0;
-        rc_rem[i]     <= '0;
-      end
-    end else begin
-      // Refresh
-      if (ref_active) begin
-        if (!dram_busy) begin
-          ref_active <= 1'b0;
-          refi_cnt   <= tREFI[$bits(refi_cnt)-1:0];
-        end
-      end else if (refi_cnt != 0) begin
-        refi_cnt <= refi_cnt - 1'b1;
-      end
+  mc_chan u_chan (
+    .clk    (clk),
+    .rst_n  (rst_n),
+    .do_act (cmd == CMD_ACT),
+    .do_rd  (cmd == CMD_RD),
+    .do_wr  (cmd == CMD_WR),
+    .do_ref (cmd == CMD_REF),
+    .act_ok (chan_act_ok),
+    .rd_ok  (chan_rd_ok),
+    .wr_ok  (chan_wr_ok),
+    .any_ok (chan_any_ok)
+  );
 
-      if (ref_issue) begin
-        ref_active <= 1'b1;
-        for (int i = 0; i < NUM_BANKS; i++) begin
-          bank_open[i] <= 1'b0;
-          ras_rem[i]   <= '0;
-          rc_rem[i]    <= '0;
-        end
-      end
+  mc_refresh #(.URGENT(REF_URGENT)) u_refresh (
+    .clk    (clk),
+    .rst_n  (rst_n),
+    .idle   (q_valid == '0),
+    .do_ref (cmd == CMD_REF),
+    .hold   (ref_hold),
+    .owed   (ref_owed)
+  );
 
-      if (win_valid)
-        rr_ptr <= win_bank + 1'b1;
+  mc_sched #(.DEPTH(DEPTH), .FR_FCFS(FR_FCFS), .STARVE_LIMIT(STARVE_LIMIT)) u_sched (
+    .q_valid     (q_valid),
+    .q_write     (q_write),
+    .q_bank      (q_bank),
+    .q_row       (q_row),
+    .q_col       (q_col),
+    .q_tag       (q_tag),
+    .q_wait      (q_wait),
+    .tag_retire  (tag_retire),
+    .bank_open   (bank_open),
+    .bank_row    (bank_row),
+    .bank_act_ok (bank_act_ok),
+    .bank_col_ok (bank_col_ok),
+    .bank_pre_ok (bank_pre_ok),
+    .chan_act_ok (chan_act_ok),
+    .chan_rd_ok  (chan_rd_ok),
+    .chan_wr_ok  (chan_wr_ok),
+    .chan_any_ok (chan_any_ok),
+    .rd_slot_ok  (rd_slot_ok),
+    .ref_hold    (ref_hold),
+    .cmd         (cmd),
+    .cmd_bank    (cmd_bank),
+    .cmd_row     (cmd_row),
+    .cmd_col     (cmd_col),
+    .serve       (serve),
+    .serve_idx   (serve_idx)
+  );
 
-      // Push
-      if (q_push) begin
-        q_valid[free_slot] <= 1'b1;
-        q_addr[free_slot]  <= req_addr;
-        q_wdata[free_slot] <= req_wdata;
-        q_write[free_slot] <= req_write;
-        q_tag[free_slot]   <= tag_alloc;
-        tag_alloc          <= tag_alloc + 1'b1;
-      end
+  mc_resp #(.RD_PIPE(RD_PIPE)) u_resp (
+    .clk             (clk),
+    .rst_n           (rst_n),
+    .acc             (acc),
+    .tag_alloc       (tag_alloc),
+    .tag_retire      (tag_retire),
+    .tag_free        (tag_free),
+    .rd_issue        (cmd == CMD_RD),
+    .wr_issue        (cmd == CMD_WR),
+    .issue_tag       (q_tag[serve_idx]),
+    .issue_wdata     (q_wdata[serve_idx]),
+    .rd_slot_ok      (rd_slot_ok),
+    .dram_wdata_en   (dram_wdata_en),
+    .dram_wdata      (dram_wdata),
+    .dram_data_valid (dram_data_valid),
+    .dram_rdata      (dram_rdata),
+    .rsp_valid       (rsp_valid),
+    .rsp_ready       (rsp_ready),
+    .rsp_rdata       (rsp_rdata)
+  );
 
-      // Dispatch
-      if (disp_valid) begin
-        q_valid[disp_slot] <= 1'b0;
-        b_addr[disp_bank]  <= q_addr[disp_slot];
-        b_wdata[disp_bank] <= q_wdata[disp_slot];
-        b_write[disp_bank] <= q_write[disp_slot];
-        b_tag[disp_bank]   <= q_tag[disp_slot];
-        b_need_act[disp_bank] <= 1'b0;
-        if (bank_open[disp_bank] &&
-            (bank_row[disp_bank] == addr_row(q_addr[disp_slot])))
-          b_state[disp_bank] <= q_write[disp_slot] ? ST_WR : ST_RD;
-        else if (bank_open[disp_bank]) begin
-          b_need_act[disp_bank] <= 1'b1;
-          b_state[disp_bank]    <= ST_PRE;
-        end else
-          b_state[disp_bank] <= ST_ACT;
-      end
+  assign dram_cmd  = cmd;
+  assign dram_bank = cmd_bank;
+  assign dram_row  = cmd_row;
+  assign dram_col  = cmd_col;
 
-      // Count update
-      unique case ({q_push, disp_valid})
-        2'b10: q_count <= q_count + 1'b1;
-        2'b01: q_count <= q_count - 1'b1;
-        2'b11: q_count <= q_count;
-        default: ;
-      endcase
-
-      // Timers
-      for (int i = 0; i < NUM_BANKS; i++) begin
-        if (ras_rem[i] != 0) ras_rem[i] <= ras_rem[i] - 1'b1;
-        if (rc_rem[i]  != 0) rc_rem[i]  <= rc_rem[i]  - 1'b1;
-        if (b_timer[i] != 0) b_timer[i] <= b_timer[i] - 8'd1;
-      end
-
-      // Issue side-effects
-      if (win_valid) begin
-        case (win_cmd)
-          CMD_PRE: begin
-            bank_open[win_bank] <= 1'b0;
-            b_timer[win_bank]   <= 8'(tRP > 0 ? tRP - 1 : 0);
-            b_state[win_bank]   <= ST_PRE_WAIT;
-          end
-          CMD_ACT: begin
-            bank_open[win_bank] <= 1'b1;
-            bank_row[win_bank]  <= addr_row(b_addr[win_bank]);
-            ras_rem[win_bank]   <= tRAS[$bits(ras_rem[0])-1:0];
-            rc_rem[win_bank]    <= tRC[$bits(rc_rem[0])-1:0];
-            b_timer[win_bank]   <= 8'(tRCD > 0 ? tRCD - 1 : 0);
-            b_state[win_bank]   <= ST_ACT_WAIT;
-          end
-          CMD_WR: begin
-            b_timer[win_bank] <= 8'(tWR > 0 ? tWR - 1 : 0);
-            b_state[win_bank] <= ST_WR_WAIT;
-          end
-          CMD_RD: begin
-            rd_inflight       <= 1'b1;
-            rd_bank_q         <= win_bank;
-            b_state[win_bank] <= ST_RD_WAIT;
-          end
-          default: ;
-        endcase
-      end
-
-      // Wait exits
-      for (int i = 0; i < NUM_BANKS; i++) begin
-        if (!(win_valid && win_bank == i[$clog2(NUM_BANKS)-1:0] && win_cmd == CMD_PRE)) begin
-          if (b_state[i] == ST_PRE_WAIT && b_timer[i] == 0) begin
-            if (b_need_act[i]) begin
-              b_need_act[i] <= 1'b0;
-              b_state[i]    <= ST_ACT;
-            end else
-              b_state[i] <= ST_IDLE;
-          end
-        end
-        if (!(win_valid && win_bank == i[$clog2(NUM_BANKS)-1:0] && win_cmd == CMD_ACT)) begin
-          if (b_state[i] == ST_ACT_WAIT && b_timer[i] == 0)
-            b_state[i] <= b_write[i] ? ST_WR : ST_RD;
-        end
-        if (!(win_valid && win_bank == i[$clog2(NUM_BANKS)-1:0] && win_cmd == CMD_WR)) begin
-          if (b_state[i] == ST_WR_WAIT && b_timer[i] == 0) begin
-            rsp_done[b_tag[i]] <= 1'b1;
-            rsp_data[b_tag[i]] <= '0;
-            b_state[i] <= ST_IDLE;
-          end
-        end
-      end
-
-      if (rd_inflight && dram_data_valid) begin
-        rsp_done[b_tag[rd_bank_q]] <= 1'b1;
-        rsp_data[b_tag[rd_bank_q]] <= dram_rdata;
-        b_state[rd_bank_q] <= ST_IDLE;
-        rd_inflight <= 1'b0;
-      end
-
-      if (rsp_valid && rsp_ready) begin
-        rsp_done[tag_retire] <= 1'b0;
-        tag_retire <= tag_retire + 1'b1;
-      end
-    end
-  end
-
-  // dram_page_hit is observability only. Verilator skips *unused* names in its
-  // UNUSED check, so a wire is enough; the old flop here only silenced lint.
-  wire unused_page_hit = dram_page_hit;
+  // Owed REFs are visible to waveforms and the testbench; the logic uses ref_hold.
+  wire unused_owed = ^ref_owed;
 
 endmodule

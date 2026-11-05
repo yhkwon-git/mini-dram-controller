@@ -26,10 +26,21 @@ REGRESS_DIR ?= build/regress
 COV_DIR     ?= build/cov
 COV_SEEDS   ?= 1 2 3
 
+# Controller build variants that the regression and coverage also run, so the
+# code behind each parameter is exercised: name:-Gflag[,-Gflag...]
+VARIANTS      ?= fcfs:-GP_FR_FCFS=0 starve24:-GP_STARVE_LIMIT=24 rdpipe1:-GP_RD_PIPE=1 depth4:-GP_DEPTH=4
+VARIANT_SEEDS ?= 10
+
 RTL_SRCS := \
   rtl/dram_pkg.sv \
   rtl/host_if.sv \
   rtl/dram_model.sv \
+  rtl/mc_queue.sv \
+  rtl/mc_bank.sv \
+  rtl/mc_chan.sv \
+  rtl/mc_refresh.sv \
+  rtl/mc_sched.sv \
+  rtl/mc_resp.sv \
   rtl/mem_ctrl.sv \
   rtl/mem_ctrl_top.sv
 
@@ -46,15 +57,16 @@ ifeq ($(WAVES),1)
   WAVE_FLAGS := --trace +define+WAVES
 endif
 
-.PHONY: help sim rand-build sim-rand regress cov lint sim-cocotb clean check-tools check-verilator
+.PHONY: help sim rand-build rand-variants sim-rand regress cov ppa lint sim-cocotb clean check-tools check-verilator
 
 help:
 	@echo "Targets:"
 	@echo "  make sim           - directed testbench with the bound checkers"
 	@echo "  make sim WAVES=1   - same, and write tb_mem_ctrl.vcd"
 	@echo "  make sim-rand      - one random run (PATTERN=$(PATTERN) SEED=$(SEED) N=$(N))"
-	@echo "  make regress       - random regression ($(SEEDS) seeds x $(N) requests per pattern)"
+	@echo "  make regress       - random regression ($(SEEDS) seeds x $(N) requests per pattern, plus variants)"
 	@echo "  make cov           - line / branch / toggle coverage, directed + random"
+	@echo "  make ppa           - area and timing of mem_ctrl (sv2v, Yosys, Nangate45, OpenSTA)"
 	@echo "  make lint          - Verilator lint-only on the RTL"
 	@echo "  make sim-cocotb    - optional cocotb smoke test (cocotb >= 2.0)"
 	@echo "  make check-tools   - print tool availability"
@@ -82,9 +94,17 @@ rand-build: check-verilator
 sim-rand: rand-build
 	$(RAND_DIR)/sim_rand +PATTERN=$(PATTERN) +SEED=$(SEED) +N=$(N)
 
-regress: rand-build
-	BIN=$(RAND_DIR)/sim_rand OUT=$(REGRESS_DIR) SEEDS=$(SEEDS) N=$(N) PATTERNS="$(PATTERNS)" \
-	  bash tb/run_regress.sh
+rand-variants: check-verilator
+	@for v in $(VARIANTS); do n=$${v%%:*}; f=$$(echo $${v#*:} | tr ',' ' '); \
+	  echo "building variant $$n ($$f)"; mkdir -p $(RAND_DIR)_$$n; \
+	  $(VERILATOR) $(VFLAGS) --Mdir $(RAND_DIR)_$$n --top-module tb_mem_ctrl_rand $$f \
+	    $(RTL_SRCS) $(TB_CHECK) $(TB_RAND) -o sim_rand > $(RAND_DIR)_$$n/build.log 2>&1 \
+	    || { cat $(RAND_DIR)_$$n/build.log; exit 1; }; \
+	done
+
+regress: rand-build rand-variants
+	RUNS="default=$(RAND_DIR)/sim_rand:$(SEEDS) $(foreach v,$(VARIANTS),$(word 1,$(subst :, ,$(v)))=$(RAND_DIR)_$(word 1,$(subst :, ,$(v)))/sim_rand:$(VARIANT_SEEDS))" \
+	  OUT=$(REGRESS_DIR) N=$(N) PATTERNS="$(PATTERNS)" bash tb/run_regress.sh
 	$(PYTHON) tools/regress_report.py $(REGRESS_DIR)/regress.csv
 
 # Coverage builds write one .dat per run. tools/cov_summary.py merges them by
@@ -95,17 +115,26 @@ cov: check-verilator
 	mkdir -p $(COV_DIR)
 	$(VERILATOR) $(VFLAGS) --coverage --Mdir $(COV_DIR)/obj_dir --top-module $(TOP_TB) \
 	  $(RTL_SRCS) $(TB_CHECK) $(TB_SV) -o sim_cov > $(COV_DIR)/build.log 2>&1
-	$(VERILATOR) $(VFLAGS) --coverage --Mdir $(COV_DIR)/obj_rand --top-module tb_mem_ctrl_rand \
-	  $(RTL_SRCS) $(TB_CHECK) $(TB_RAND) -o sim_rand_cov >> $(COV_DIR)/build.log 2>&1
 	$(COV_DIR)/obj_dir/sim_cov +verilator+coverage+file+$(COV_DIR)/directed.dat > $(COV_DIR)/directed.log
-	for p in $(PATTERNS); do for s in $(COV_SEEDS); do \
-	  $(COV_DIR)/obj_rand/sim_rand_cov +PATTERN=$$p +SEED=$$s +N=$(N) \
-	    +verilator+coverage+file+$(COV_DIR)/rand_$${p}_$$s.dat > $(COV_DIR)/rand_$${p}_$$s.log || exit 1; \
-	done; done
+	@for v in default: $(VARIANTS); do n=$${v%%:*}; f=$$(echo $${v#*:} | tr ',' ' '); \
+	  echo "coverage build $$n ($$f)"; \
+	  $(VERILATOR) $(VFLAGS) --coverage --Mdir $(COV_DIR)/obj_$$n --top-module tb_mem_ctrl_rand $$f \
+	    $(RTL_SRCS) $(TB_CHECK) $(TB_RAND) -o sim > $(COV_DIR)/build_$$n.log 2>&1 || exit 1; \
+	  seeds="$(COV_SEEDS)"; [ "$$n" = default ] || seeds=1; \
+	  for p in $(PATTERNS); do for s in $$seeds; do \
+	    $(COV_DIR)/obj_$$n/sim +CONFIG=$$n +PATTERN=$$p +SEED=$$s +N=$(N) \
+	      +verilator+coverage+file+$(COV_DIR)/rand_$${n}_$${p}_$$s.dat > $(COV_DIR)/rand_$${n}_$${p}_$$s.log || exit 1; \
+	  done; done; \
+	done
 	@echo "== directed only =="
 	@$(PYTHON) tools/cov_summary.py $(COV_DIR)/directed.dat
-	@echo "== directed + random =="
+	@echo "== directed + random (default build and variants) =="
 	@$(PYTHON) tools/cov_summary.py $(COV_DIR)/*.dat
+
+# Area and timing: sv2v -> Yosys (Nangate45 typical) -> OpenSTA. Set SV2V and LIB
+# if the tools are not where syn/ppa.sh expects them.
+ppa:
+	OUT=build/ppa bash syn/ppa.sh
 
 check-verilator:
 	@command -v $(VERILATOR) >/dev/null 2>&1 || { \

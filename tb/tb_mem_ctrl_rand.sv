@@ -14,7 +14,14 @@
 module tb_mem_ctrl_rand
   import dram_pkg::*;
   import mc_tb_pkg::*;
-;
+#(
+  // mem_ctrl parameters, settable at build time (verilator -G<name>=<value>)
+  parameter int P_DEPTH        = QUEUE_DEPTH,
+  parameter bit P_FR_FCFS      = 1'b1,
+  parameter int P_RD_PIPE      = 4,
+  parameter int P_STARVE_LIMIT = 160,
+  parameter int P_REF_URGENT   = 4
+);
 
   logic clk;
   initial clk = 1'b0;
@@ -26,7 +33,13 @@ module tb_mem_ctrl_rand
   logic                 page_hit_unused;
   logic [NUM_BANKS-1:0] bank_open_unused;
 
-  mem_ctrl_top dut (
+  mem_ctrl_top #(
+    .DEPTH        (P_DEPTH),
+    .FR_FCFS      (P_FR_FCFS),
+    .RD_PIPE      (P_RD_PIPE),
+    .STARVE_LIMIT (P_STARVE_LIMIT),
+    .REF_URGENT   (P_REF_URGENT)
+  ) dut (
     .clk            (clk),
     .rst_n          (hif.rst_n),
     .req_valid      (hif.req_valid),
@@ -47,10 +60,12 @@ module tb_mem_ctrl_rand
 
   // A column command with no ACT on its bank since the previous column command
   // is a row hit. An ACT after a PRE makes it a conflict, an ACT on a closed
-  // bank a miss. REF closes every row.
+  // bank a miss. PREA and REF close every row for refresh, not for a conflict.
+  // A data beat is a cycle with read data or write data on the DRAM bus.
   bit          act_seen [NUM_BANKS];
   bit          pre_seen [NUM_BANKS];
   int unsigned          access_errs;
+  int unsigned          rds_in_flight;
   logic [BANK_BITS-1:0] b;
 
   always @(posedge clk) begin
@@ -59,11 +74,16 @@ module tb_mem_ctrl_rand
         act_seen[i] = 1'b0;
         pre_seen[i] = 1'b0;
       end
-      access_errs = 0;
+      access_errs   = 0;
+      rds_in_flight = 0;
     end else if (env != null) begin
       b = dut.d_bank;
       if (access_err) access_errs++;
-      if (dut.d_data_valid) env.note_beat();
+      if (dut.d_data_valid) begin
+        env.note_beat();
+        rds_in_flight--;
+      end
+      if (dut.d_wdata_en) env.note_beat();
       case (dut.d_cmd)
         CMD_PRE: pre_seen[b] = 1'b1;
         CMD_ACT: act_seen[b] = 1'b1;
@@ -71,9 +91,16 @@ module tb_mem_ctrl_rand
           env.note_col(dut.d_cmd == CMD_WR,
                        !act_seen[b] ? COL_HIT : (pre_seen[b] ? COL_CONFLICT : COL_MISS));
           env.note_col_cmd(dut.d_cmd == CMD_WR, {dut.d_bank, dut.d_row, dut.d_col});
-          if (dut.d_cmd == CMD_WR) env.note_beat();
+          if (dut.d_cmd == CMD_RD) begin
+            rds_in_flight++;
+            env.note_rd_depth(rds_in_flight);
+          end
           act_seen[b] = 1'b0;
           pre_seen[b] = 1'b0;
+        end
+        CMD_PREA: begin
+          for (int i = 0; i < NUM_BANKS; i++) pre_seen[i] = 1'b0;
+          env.note_prea();
         end
         CMD_REF: begin
           for (int i = 0; i < NUM_BANKS; i++) pre_seen[i] = 1'b0;

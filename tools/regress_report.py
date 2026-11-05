@@ -70,33 +70,57 @@ def coverage_table(rows):
     print(f"\nfunctional bins hit: {hit_bins}/{len(bins)}")
 
 
-def plots(groups, outdir):
+def config_table(rows):
+    """One line per controller build: checks, and data bus busy / latency averaged over patterns."""
+    configs = list(OrderedDict.fromkeys(r.get("config", "default") for r in rows))
+    print("| build | runs | PASS | data mismatches | violations | data bus busy % | latency avg |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+    for c in configs:
+        runs = [r for r in rows if r.get("config", "default") == c]
+        per_pattern = group(runs).values()
+        busy = statistics.fmean(mean(g, "util_pct") for g in per_pattern)
+        lat = statistics.fmean(mean(g, "lat_avg") for g in group(runs).values())
+        passed = sum(r["result"] == "PASS" for r in runs)
+        print(f"| {c} | {len(runs)} | {passed}/{len(runs)} | {total(runs, 'mismatches')} | "
+              f"{total(runs, 'violations')} | {busy:.1f} | {lat:.1f} |")
+
+
+def plots(groups, outdir, baseline=None, base_label="v1"):
     try:
         import plot_regress  # tools/plot_regress.py
     except ImportError as exc:
         sys.exit(f"--plots needs matplotlib: {exc}")
     plot_regress.draw(groups, outdir)
+    if baseline:
+        base = {r["pattern"]: r for r in load(baseline)}
+        plot_regress.draw_compare(groups, base, outdir, base_label=base_label)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("csv")
     ap.add_argument("--plots", metavar="DIR")
+    ap.add_argument("--baseline", metavar="CSV",
+                    help="per-pattern means of an earlier controller; adds a comparison chart")
+    ap.add_argument("--baseline-label", default="v1")
     args = ap.parse_args()
     rows = load(args.csv)
     if not rows:
         sys.exit(f"{args.csv}: no runs")
-    groups = group(rows)
+    default = [r for r in rows if r.get("config", "default") == "default"] or rows
+    groups = group(default)
     runs = len(rows)
     passed = sum(r["result"] == "PASS" for r in rows)
     print(f"{runs} runs, {sum(int(r['n']) for r in rows):,} requests, {passed} PASS, {runs - passed} FAIL\n")
+    config_table(rows)
+    print("\ndefault build, per pattern:\n")
     checks_table(groups)
     print()
     perf_table(groups)
-    print()
+    print("\nall builds:\n")
     coverage_table(rows)
     if args.plots:
-        plots(groups, args.plots)
+        plots(groups, args.plots, args.baseline, args.baseline_label)
 
 
 if __name__ == "__main__":

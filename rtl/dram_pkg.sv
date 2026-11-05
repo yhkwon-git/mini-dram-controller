@@ -1,33 +1,48 @@
-// Mini-DRAM package — geometry, timing, commands, FSM states (see docs/spec.md).
+// Mini-DRAM package: geometry, timing, commands, address helpers (docs/spec.md).
 `timescale 1ns/1ps
 
 package dram_pkg;
 
   // ---------------------------------------------------------------------------
-  // Geometry — matches docs/spec.md address map
+  // Geometry
   // ---------------------------------------------------------------------------
-  localparam int NUM_BANKS      = 4;
-  localparam int ROW_BITS       = 8;   // 256 rows / bank
-  localparam int COL_BITS       = 4;   // 16 columns / row
-  localparam int DATA_BITS      = 32;
-  localparam int ADDR_BITS      = $clog2(NUM_BANKS) + ROW_BITS + COL_BITS; // 14
-  localparam int QUEUE_DEPTH    = 4;   // host request queue (multi-outstanding)
-  localparam int QUEUE_AW       = $clog2(QUEUE_DEPTH);
+  localparam int NUM_BANKS   = 4;
+  localparam int BANK_BITS   = $clog2(NUM_BANKS);
+  localparam int ROW_BITS    = 8;    // 256 rows per bank
+  localparam int COL_BITS    = 4;    // 16 columns per row
+  localparam int DATA_BITS   = 32;   // one RD/WR moves one 32-bit burst, one cycle on the data bus
+  localparam int ADDR_BITS   = BANK_BITS + ROW_BITS + COL_BITS;  // 14
+  localparam int QUEUE_DEPTH = 8;    // request queue entries (mem_ctrl parameter default)
+  localparam int TAG_BITS    = 4;    // response tags: at most 15 requests in flight
 
   // ---------------------------------------------------------------------------
-  // Timing (clock cycles) — own model; see docs/spec.md
+  // Timing in controller cycles. Own scaled model, not JEDEC values.
+  // A gap counts the clock edges between the two edges that sample the events.
   // ---------------------------------------------------------------------------
+  // Same bank
   localparam int tRCD = 3;   // ACT -> RD/WR
-  localparam int tRP  = 3;   // PRE -> ACT
-  localparam int tRAS = 6;   // ACT -> PRE (min)
-  localparam int tRC  = 9;   // ACT -> ACT same bank (≈ tRAS+tRP)
-  localparam int tRFC = 12;  // REF busy window
-  localparam int tCL  = 2;   // RD -> data_valid
-  localparam int tWR  = 2;   // WR recovery before PRE
-  localparam int tREFI = 64; // refresh opportunity period
+  localparam int tRP  = 3;   // PRE/PREA -> ACT or REF
+  localparam int tRAS = 6;   // ACT -> PRE
+  localparam int tRC  = 9;   // ACT -> ACT
+  localparam int tRTP = 2;   // RD -> PRE
+  localparam int tWR  = 2;   // write recovery: WR -> PRE >= WL + 1 + tWR
+  // Any bank
+  localparam int tCCD = 1;   // RD/WR -> RD/WR (one burst per cycle)
+  localparam int tRRD = 2;   // ACT -> ACT, different banks
+  localparam int tFAW = 8;   // at most four ACTs in any tFAW window
+  localparam int tWTR = 4;   // WR -> RD
+  localparam int tRTW = 4;   // RD -> WR (data bus turnaround)
+  // Data
+  localparam int tCL  = 2;        // RD -> the edge where the model registers data_valid
+  localparam int RL   = tCL + 1;  // RD -> the edge that samples data_valid
+  localparam int WL   = 1;        // WR -> the edge that samples wdata_en and wdata
+  // Refresh
+  localparam int tRFC  = 12;  // REF -> next command
+  localparam int tREFI = 64;  // one REF is owed every tREFI cycles
+  localparam int REF_POSTPONE_MAX = 8;  // REFs that may be owed before data is at risk
 
   // ---------------------------------------------------------------------------
-  // DRAM command encoding (controller -> model)
+  // DRAM commands (controller -> model)
   // ---------------------------------------------------------------------------
   typedef enum logic [2:0] {
     CMD_NOP  = 3'b000,
@@ -35,32 +50,15 @@ package dram_pkg;
     CMD_RD   = 3'b010,
     CMD_WR   = 3'b011,
     CMD_PRE  = 3'b100,
-    CMD_REF  = 3'b101
+    CMD_REF  = 3'b101,  // all banks; every bank must be precharged
+    CMD_PREA = 3'b110   // precharge all open banks
   } dram_cmd_e;
 
   // ---------------------------------------------------------------------------
-  // Per-bank engine states (mem_ctrl keeps one b_state per bank).
-  // ST_REF / ST_REF_WAIT / ST_ERROR are reserved: refresh is handled by the
-  // global ref_active flag in mem_ctrl, not by a bank state.
+  // Host address map: [bank | row | col]
   // ---------------------------------------------------------------------------
-  typedef enum logic [3:0] {
-    ST_IDLE,
-    ST_ACT,
-    ST_ACT_WAIT,
-    ST_RD,
-    ST_RD_WAIT,
-    ST_WR,
-    ST_WR_WAIT,
-    ST_PRE,
-    ST_PRE_WAIT,
-    ST_REF,
-    ST_REF_WAIT,
-    ST_ERROR
-  } ctrl_state_e;
-
-  // Address helpers
-  function automatic logic [$clog2(NUM_BANKS)-1:0] addr_bank(input logic [ADDR_BITS-1:0] a);
-    return a[ADDR_BITS-1 -: $clog2(NUM_BANKS)];
+  function automatic logic [BANK_BITS-1:0] addr_bank(input logic [ADDR_BITS-1:0] a);
+    return a[ADDR_BITS-1 -: BANK_BITS];
   endfunction
 
   function automatic logic [ROW_BITS-1:0] addr_row(input logic [ADDR_BITS-1:0] a);

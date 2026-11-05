@@ -13,7 +13,8 @@ import sys
 from collections import defaultdict
 
 KINDS = [("line", "Line"), ("branch", "Branch"), ("expr", "Expr"), ("toggle", "Toggle")]
-MODULE_ORDER = ["mem_ctrl", "dram_model", "mem_ctrl_top", "host_if"]
+MODULE_ORDER = ["mem_ctrl", "mc_queue", "mc_sched", "mc_bank", "mc_chan", "mc_refresh",
+                "mc_resp", "dram_model", "mem_ctrl_top", "host_if"]
 
 
 def points(path):
@@ -40,6 +41,9 @@ def merge(paths):
                 continue
             kind, _, module = f.get("page", "").partition("/")
             kind = kind[2:] if kind.startswith("v_") else kind
+            # Verilator names a module built with explicit parameters "name__D8";
+            # fold those copies into the module they came from.
+            module = module.split("__")[0]
             key = (module, kind, src, f.get("l"), f.get("n"), f.get("o"))
             covered[key] = covered.get(key, False) or count > 0
     return covered
@@ -84,6 +88,11 @@ def main(args):
     print("| --- |" + " ---: |" * len(KINDS))
     for m in modules:
         print(f"| `{m}` | " + " | ".join(cell(*totals[(m, k)]) for k, _ in KINDS) + " |")
+    ctrl = [m for m in modules if m == "mem_ctrl" or m.startswith("mc_")]
+    if ctrl:
+        row = [cell(sum(totals[(m, k)][0] for m in ctrl), sum(totals[(m, k)][1] for m in ctrl))
+               for k, _ in KINDS]
+        print("| controller (`mem_ctrl` + `mc_*`) | " + " | ".join(row) + " |")
     all_rtl = [cell(sum(totals[(m, k)][0] for m in modules), sum(totals[(m, k)][1] for m in modules))
                for k, _ in KINDS]
     print("| RTL total | " + " | ".join(all_rtl) + " |")

@@ -17,7 +17,6 @@
 package mc_tb_pkg;
   import dram_pkg::*;
 
-  localparam int BANK_BITS   = $clog2(NUM_BANKS);
   localparam int HANG_CYCLES = 4000;  // no response for this long = the controller is stuck
   localparam int MAX_REPORTS = 20;
 
@@ -38,6 +37,11 @@ package mc_tb_pkg;
     CV_REF_OWED,        // REF while responses are still owed to the host
     CV_REF_STALLED,     // REF while a finished response waits on rsp_ready
     CV_REORDER,         // a column command serves a request ahead of an older one
+    CV_RD_PIPE_2,       // two RDs on the DRAM bus whose data has not come back
+    CV_RD_PIPE_3,       // three
+    CV_PREA,            // PREA closes the open banks before a REF
+    CV_REF_IDLE,        // REF with no request in flight (paid back while idle)
+    CV_REF_LOADED,      // REF with 4+ requests in flight (urgent refresh under load)
     CV_N
   } cov_bin_e;
 
@@ -88,6 +92,7 @@ package mc_tb_pkg;
     int unsigned     hot_pct      = 80;  // P_HOTBANK share of requests to bank 0
     int unsigned     reuse_pct    = 20;  // chance to reuse a recently written address
     string           csv          = "";  // append one result line to this file
+    string           config_name  = "default";  // controller build variant, for the CSV
 
     function bit from_plusargs();
       void'($value$plusargs("PATTERN=%s", pattern_name));
@@ -101,6 +106,7 @@ package mc_tb_pkg;
       void'($value$plusargs("HOT_PCT=%d", hot_pct));
       void'($value$plusargs("REUSE_PCT=%d", reuse_pct));
       void'($value$plusargs("CSV=%s", csv));
+      void'($value$plusargs("CONFIG=%s", config_name));
       if      (pattern_name == "seq")     pattern = P_SEQ;
       else if (pattern_name == "rand")    pattern = P_RAND;
       else if (pattern_name == "stride")  pattern = P_STRIDE;
@@ -112,8 +118,8 @@ package mc_tb_pkg;
     endfunction
 
     function string show();
-      return $sformatf("pattern=%s seed=%0d n=%0d rd=%0d%% gap<=%0d bp=%0d%%/%0d stride=%0d hot=%0d%% reuse=%0d%%",
-                       pattern_name, seed, n_txn, rd_pct, gap_max, bp_pct, bp_max, stride,
+      return $sformatf("config=%s pattern=%s seed=%0d n=%0d rd=%0d%% gap<=%0d bp=%0d%%/%0d stride=%0d hot=%0d%% reuse=%0d%%",
+                       config_name, pattern_name, seed, n_txn, rd_pct, gap_max, bp_pct, bp_max, stride,
                        hot_pct, reuse_pct);
     endfunction
   endclass
@@ -346,6 +352,11 @@ package mc_tb_pkg;
       label[CV_REF_OWED]       = "REF with responses still owed";
       label[CV_REF_STALLED]    = "REF while rsp_ready is low";
       label[CV_REORDER]        = "column command passes an older request";
+      label[CV_RD_PIPE_2]      = "2 RDs in flight on the DRAM bus";
+      label[CV_RD_PIPE_3]      = "3 RDs in flight on the DRAM bus";
+      label[CV_PREA]           = "PREA before REF";
+      label[CV_REF_IDLE]       = "REF with nothing in flight";
+      label[CV_REF_LOADED]     = "REF with 4+ requests in flight";
       short_name[CV_RD_HIT]         = "rd_hit";
       short_name[CV_RD_MISS]        = "rd_miss";
       short_name[CV_RD_CONFLICT]    = "rd_conflict";
@@ -363,6 +374,11 @@ package mc_tb_pkg;
       short_name[CV_REF_OWED]       = "ref_owed";
       short_name[CV_REF_STALLED]    = "ref_stalled";
       short_name[CV_REORDER]        = "reorder";
+      short_name[CV_RD_PIPE_2]      = "rd_pipe_2";
+      short_name[CV_RD_PIPE_3]      = "rd_pipe_3";
+      short_name[CV_PREA]           = "prea";
+      short_name[CV_REF_IDLE]       = "ref_idle";
+      short_name[CV_REF_LOADED]     = "ref_loaded";
       foreach (hits[i]) hits[i] = 0;
     endfunction
 
@@ -606,7 +622,19 @@ package mc_tb_pkg;
 
     function void note_ref();
       if (sb.pending.size() != 0) cov.hit(CV_REF_OWED);
+      if (sb.pending.size() == 0) cov.hit(CV_REF_IDLE);
+      if (sb.pending.size() >= 4) cov.hit(CV_REF_LOADED);
       if (vif.rsp_valid === 1'b1 && vif.rsp_ready !== 1'b1) cov.hit(CV_REF_STALLED);
+    endfunction
+
+    function void note_prea();
+      cov.hit(CV_PREA);
+    endfunction
+
+    // rds: RDs on the DRAM bus whose data has not come back, this one included
+    function void note_rd_depth(int unsigned rds);
+      if (rds >= 2) cov.hit(CV_RD_PIPE_2);
+      if (rds >= 3) cov.hit(CV_RD_PIPE_3);
     endfunction
 
     function int unsigned report();
@@ -667,15 +695,15 @@ package mc_tb_pkg;
         return;
       end
       if (need_header) begin
-        line = {"pattern,seed,n,result,problems,span,util_pct,lat_avg,lat_p50,lat_p99,lat_max,",
+        line = {"config,pattern,seed,n,result,problems,span,util_pct,lat_avg,lat_p50,lat_p99,lat_max,",
                 "rd_hit,rd_miss,rd_conflict,wr_hit,wr_miss,wr_conflict,hit_pct,",
                 "refs,ref_int_avg,ref_int_max,ref_debt_max,violations,waived,mismatches"};
         foreach (cov.short_name[i]) line = {line, ",cv_", cov.short_name[i]};
         $fdisplay(fd, "%s", line);
       end
       result = (problems == 0) ? "PASS" : "FAIL";
-      line = $sformatf("%s,%0d,%0d,%s,%0d,%0d,%0.2f,%0.2f,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0.2f,%0d,%0.2f,%0d,%0d,%0d,%0d,%0d",
-                       cfg.pattern_name, cfg.seed, cfg.n_txn, result, problems, span, util_pct,
+      line = $sformatf("%s,%s,%0d,%0d,%s,%0d,%0d,%0.2f,%0.2f,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0.2f,%0d,%0.2f,%0d,%0d,%0d,%0d,%0d",
+                       cfg.config_name, cfg.pattern_name, cfg.seed, cfg.n_txn, result, problems, span, util_pct,
                        lat_avg, lat_p50, lat_p99, lat_max,
                        col_kind[0][COL_HIT], col_kind[0][COL_MISS], col_kind[0][COL_CONFLICT],
                        col_kind[1][COL_HIT], col_kind[1][COL_MISS], col_kind[1][COL_CONFLICT],

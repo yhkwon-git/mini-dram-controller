@@ -27,7 +27,7 @@ module tb_mem_ctrl
   int unsigned access_err_count;
   int unsigned rsp_err_count;      // rsp_err pulses on accepted responses (v1: must stay 0)
   int unsigned ref_count;          // CMD_REF issued to the model
-  int unsigned max_engines_active; // scenario 4: bank engines outside ST_IDLE at once
+  int unsigned max_banks_opening;  // scenario 4: banks with an ACT whose RD/WR has not issued
 
   mem_ctrl_top dut (
     .clk(clk),
@@ -57,15 +57,21 @@ module tb_mem_ctrl
   end
 `endif
 
+  // Banks being opened: an ACT went out and that bank's RD/WR has not yet.
+  logic [NUM_BANKS-1:0] opening;
+
   always_ff @(posedge clk) begin
     if (!rst_n) begin
       access_err_count <= 0;
       rsp_err_count    <= 0;
       ref_count        <= 0;
+      opening          <= '0;
     end else begin
       if (dram_access_err)                    access_err_count <= access_err_count + 1;
       if (rsp_valid && rsp_ready && rsp_err)  rsp_err_count    <= rsp_err_count + 1;
       if (dut.d_cmd == CMD_REF)               ref_count        <= ref_count + 1;
+      if (dut.d_cmd == CMD_ACT)               opening[dut.d_bank] <= 1'b1;
+      if (dut.d_cmd == CMD_RD || dut.d_cmd == CMD_WR) opening[dut.d_bank] <= 1'b0;
     end
   end
 
@@ -77,13 +83,10 @@ module tb_mem_ctrl
     return {b, r, c};
   endfunction
 
-  // White-box probe: how many bank engines are busy right now.
-  function automatic int unsigned engines_active();
-    engines_active = 0;
-    if (dut.u_ctrl.b_state[0] != ST_IDLE) engines_active++;
-    if (dut.u_ctrl.b_state[1] != ST_IDLE) engines_active++;
-    if (dut.u_ctrl.b_state[2] != ST_IDLE) engines_active++;
-    if (dut.u_ctrl.b_state[3] != ST_IDLE) engines_active++;
+  function automatic int unsigned banks_opening();
+    banks_opening = 0;
+    for (int i = 0; i < NUM_BANKS; i++)
+      if (opening[i]) banks_opening++;
   endfunction
 
   // Drive one request and return once it is accepted (no wait for the response).
@@ -163,7 +166,7 @@ module tb_mem_ctrl
 
   initial begin
     errs               = 0;
-    max_engines_active = 0;
+    max_banks_opening  = 0;
     rst_n              = 1'b0;
     req_valid          = 1'b0;
     req_write          = 1'b0;
@@ -205,16 +208,16 @@ module tb_mem_ctrl
     check_eq("bank1 survived", rdata, 32'hC0DE_0001);
 
     // ------------------------------------------------------------------
-    $display("[TB] === SCENARIO 4: 4-bank write burst (bank engines in parallel) ===");
+    $display("[TB] === SCENARIO 4: 4-bank write burst (banks opened in parallel) ===");
     // Accept back to back without waiting for responses (rsp_ready=1 drains
-    // them). Open-page banks stay open after a serial schedule too, so the
-    // check counts bank engines that are busy at the same time instead.
+    // them). Bank parallelism shows on the DRAM pins as several banks whose
+    // ACT has gone out while their WR has not yet.
     fork
       begin : observe
         repeat (60) begin
           @(posedge clk);
-          if (engines_active() > max_engines_active)
-            max_engines_active = engines_active();
+          if (banks_opening() > max_banks_opening)
+            max_banks_opening = banks_opening();
         end
       end
       begin : burst
@@ -226,9 +229,9 @@ module tb_mem_ctrl
     join
     // Drain any remaining write responses
     repeat (80) @(posedge clk);
-    $display("[TB] peak bank engines active at once=%0d", max_engines_active);
-    if (max_engines_active < 2) begin
-      $display("[TB] ERROR expected >=2 bank engines active at once during the burst");
+    $display("[TB] peak banks opening at once=%0d", max_banks_opening);
+    if (max_banks_opening < 2) begin
+      $display("[TB] ERROR expected >=2 banks opening at once during the burst");
       errs++;
     end
     host_read(make_addr(2'd0, 8'h10, 4'h0), rdata);

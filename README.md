@@ -184,7 +184,25 @@ flowchart TB
 - **쓰기 모아 보내기**: 처리량은 같고 방향 전환이 19% 줄며 읽기 latency가 1.5% 짧다. FR-FCFS가 이미 방향별로 묶어 내기 때문이다(tWTR · tRTW 동안 반대 방향 명령이 준비되지 않는다). v3에서 처음에는 반대 큐를 아예 막았다가 처리량이 seed 1에서 최대 12% 떨어져, 우선순위만 바꾸고 빈 슬롯은 반대 큐가 쓰게 했다.
 - **close page**: v3에서는 랜덤 · stride에서 5–8% 높았는데 v4에서는 +3%다. auto-precharge의 이점은 PRE 명령 슬롯을 아끼는 것인데, 버스를 나눈 뒤에는 PRE가 RD/WR와 슬롯을 다투지 않는다.
 - **timer**: open과 거의 같다. refresh가 tREFI마다 모든 뱅크를 한 번씩 닫아 16사이클 timeout이 걸릴 일이 적다.
-- **매핑**: XOR과 row:bank:col은 16 word stride에서 둘 다 뱅크를 돈다. 차이가 나는 64 word stride를 넣은 트래픽 × 정책 매트릭스는 [다음 단계](#다음-단계)에 있다.
+- **매핑**: XOR과 row:bank:col은 16 word stride에서 둘 다 뱅크를 돈다. 64 word stride에서는 XOR만 버틴다(아래 분석).
+
+### 트래픽 × 기능 분석
+
+빌드 16개(v4 기본에서 파라미터를 하나씩 바꿈) × 트래픽 7종(64 word stride 포함) × 두 부하(랜덤, 포화)로 1,456회를 돌리고, 같은 파라미터로 면적과 타이밍을 합성했다(`make matrix`, `make ppa-sweep`). 전체 표와 해석은 [분석 문서](docs/analysis.md)에 있다.
+
+<p align="center"><img src="docs/images/matrix_busy.png" width="900" alt="빌드 16개 × 트래픽 7종의 데이터 버스 사용률 heatmap. 왼쪽은 랜덤 부하, 오른쪽은 포화. 수치는 분석 문서의 표와 같다"></p>
+
+| 질문 | 답 | 근거 |
+| --- | --- | --- |
+| 가장 큰 손잡이는? | per-bank refresh | all-bank로 바꾸면 포화 평균 −16%, 면적 차이 2% |
+| 명령 버스 분리는? | 공짜에 가깝다 | 하나로 바꾸면 포화 −7%, 면적 0.4% 이내 |
+| 주소 매핑은? | XOR만 모든 stride에서 버틴다 | 64 word stride: XOR 27.0%, 나머지 8.5–10.0% |
+| 큐 8 + 8은? | 처리량 +6%에 면적 +46% | 4 + 4는 읽기 latency 절반, 면적 −31% |
+| RD 파이프라이닝은? | 필수 | 1개로 줄이면 포화 −19%, 면적 0.4% |
+| FR-FCFS 대 FCFS는? | 이 모델에서는 같다 | FCFS가 면적 +8%(두 큐 사이 나이 필요) |
+| 쓰기 모아 보내기는? | 평균은 좋고 꼬리는 나쁘다 | 읽기 평균 −1.7%, p99 +9% |
+
+<sub>fmax는 같은 논리의 세 매핑이 310 MHz, XOR 게이트 두 개가 더 있는 기본 빌드가 348 MHz일 만큼 ABC 잡음(±12%)이 커서, 기능 하나의 타이밍 비용은 이 흐름으로 가려내지 않았다. FF와 면적 차이는 구조에서 나온다.</sub>
 
 ### 설계 trade-off
 
@@ -452,6 +470,8 @@ make sim-rand        # 랜덤 1회 (PATTERN=mixed SEED=1 N=2000)
 make regress         # 랜덤 회귀: 패턴 6 × SEEDS × N, 변형 빌드 15개 포함
 make cov             # line / branch / toggle 커버리지, directed + 랜덤
 make ppa             # 면적과 타이밍 (sv2v, Yosys, OpenSTA, Nangate45 필요)
+make matrix          # 빌드 16 × 트래픽 7 × 두 부하, docs/analysis.md의 표와 heatmap
+make ppa-sweep       # 빌드마다 같은 파라미터로 면적과 타이밍
 make sim WAVES=1     # tb_mem_ctrl.vcd도 기록
 make lint            # Verilator lint-only
 ```
@@ -497,11 +517,13 @@ syn/
 tools/
   regress_report.py            회귀 CSV 요약 표, --plots로 그래프
   plot_regress.py              패턴별 기준선, 버전 비교 그래프
+  matrix_report.py             트래픽 × 빌드 표, heatmap, 빌드별 면적 · 타이밍
   cov_summary.py               커버리지 병합, 모듈별 표, --holes
 docs/
   spec.md                      주소 맵, 타이밍, 명령, 인터페이스, 스케줄러, 쓰기 묶음, page 정책, refresh
   verification.md              검증 구조, 체커 규칙, 회귀 · 커버리지 결과
   scheduler-throughput.md      버전별 latency, 처리량, 정책 비교, trade-off
+  analysis.md                  트래픽 × 기능 매트릭스, 성능 대 면적 · 타이밍, 권장 설정
   coverage.md                  시나리오별 확인 항목, 닫힌 구멍과 남은 구멍
   data/                        버전 비교 그래프의 기준값 (v1, v2, v3)
   images/                      README 그래프와 파형
@@ -516,13 +538,16 @@ Makefile                       sim, sim-rand, regress, cov, ppa, lint, sim-cocot
 | [스펙](docs/spec.md) | 주소 맵, 뱅크 그룹 타이밍, 명령 집합과 두 버스, DRAM · 호스트 인터페이스, 스케줄러, 쓰기 묶음, page 정책, refresh, RFM, 파라미터 |
 | [검증](docs/verification.md) | bind 체커 규칙, 랜덤 TB 구조, 트래픽 패턴, 회귀 · 기능 커버리지 · 코드 커버리지 결과 |
 | [스케줄러 latency · throughput](docs/scheduler-throughput.md) | v0 – v4 경로별 latency, 처리량, 두 버스 · refresh 방식 · 정책 · 매핑 비교, trade-off |
+| [분석](docs/analysis.md) | 트래픽 7종 × 빌드 16개 × 두 부하, refresh · 버스 · 매핑 · 큐 깊이 · 정책별 성능과 면적 · 타이밍, 권장 설정 |
 | [커버리지](docs/coverage.md) | 시나리오별 확인 항목, 랜덤 회귀로 닫힌 구멍, 남은 구멍 |
 | [포트폴리오 PDF](portfolio-deck/MiniDramController_Portfolio.pdf) | v1의 아키텍처 비교, RTL 구현, 파형, 디버그, PPA를 21쪽으로 정리 |
 
 ## 다음 단계
 
-- [ ] 트래픽 × 정책 매트릭스(64 word stride 포함)와 기능별 면적 · 타이밍 trade-off 표
+- [ ] 뱅크 그룹을 word 단위로 섞으면서 XOR 해싱을 유지하는 매핑 (연속 주소와 stride를 함께)
+- [ ] 배치 · 배선이 있는 흐름(OpenROAD)으로 기능별 타이밍 비용 다시 재기
 - [ ] 응답 버퍼(FF의 34%) 축소, `dram_model` 오류 경로 negative test
+- [x] 트래픽 × 정책 매트릭스(64 word stride 포함)와 기능별 면적 · 타이밍 trade-off 표 ([분석](docs/analysis.md))
 - [x] 행 · 열 명령 버스 분리, 뱅크 그룹(tCCD · tRRD · tWTR의 S/L), per-bank refresh, RFM (v4)
 - [x] 읽기 · 쓰기 큐 분리, posted write와 포워딩, 쓰기 모아 보내기 (v3)
 - [x] page 정책 3종(open · close · timer), 주소 매핑 4종(XOR · row:bank:col · row:col:bank · bank:row:col) (v3)

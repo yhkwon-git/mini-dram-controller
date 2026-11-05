@@ -1,7 +1,7 @@
 """PNG charts for tools/regress_report.py --plots (needs matplotlib).
 
 draw():         four panels in the same pattern order: row hit rate, data bus
-                busy, latency (average and p99), and the average REF interval
+                busy, latency (average and p99), and the average refresh interval per bank
                 against tREFI.
 draw_compare(): the same measures for a baseline (an earlier controller) and
                 the current one, as paired bars.
@@ -125,7 +125,7 @@ def draw(groups, outdir, name="regress_baseline.png"):
     panels = [
         (axes[0][0], "Row hit rate, %", "hit_pct", 100, 20),
         (axes[0][1], "Data bus busy, % of cycles", "util_pct", 40, 10),
-        (axes[1][1], "REF interval, average cycles", "ref_int_avg", 160, 40),
+        (axes[1][1], "Refresh interval per bank, average cycles", "ref_int_avg", 160, 40),
     ]
     for ax, title, _key, xmax, step in panels:
         _frame(ax, title, xmax, step, pad=26 if ax is axes[1][1] else 10)
@@ -171,7 +171,7 @@ def draw_compare(groups, baseline, outdir, name="regress_v1_v2.png",
     lat_max = max(120, 20 * (int(lat_top + 5) // 20 + 1))
     panels = [
         (axes[0][0], "Data bus busy, % of cycles", "util_pct", 40, 10),
-        (axes[0][1], "REF interval, average cycles", "ref_int_avg", 160, 40),
+        (axes[0][1], "Refresh interval per bank, average cycles", "ref_int_avg", 160, 40),
         (axes[1][0], "Row hit rate, %", "hit_pct", 100, 20),
         (axes[1][1], "Latency, average cycles", "lat_avg", lat_max, 20 if lat_max <= 120 else 40),
     ]

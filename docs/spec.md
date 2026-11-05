@@ -1,10 +1,10 @@
 # Mini DRAM Controller Spec / 미니 DRAM 컨트롤러 스펙
 
-**Scope:** `host_if` → `mem_ctrl` (v3: read and write queues + command-level scheduler) → `dram_model`  
+**Scope:** `host_if` → `mem_ctrl` (v4: read and write queues, command-level scheduler, row and column command buses, per-bank refresh, RFM) → `dram_model`  
 **Source of truth for constants:** `rtl/dram_pkg.sv`  
 **Clock:** single sync domain (`clk`, active-low `rst_n`). Timing is in **controller clock cycles**.
 
-v1 (bank engines, one read in flight, drain-then-REF) is in the git history up to commit `2eabd33`, v2 (one queue, writes answered when their data goes out) up to `4010a10`. This file describes v3.
+v1 (bank engines, one read in flight, drain-then-REF) is in the git history up to commit `2eabd33`, v2 (one queue, writes answered when their data goes out) up to `4010a10`, v3 (one command bus, all-bank refresh, no bank groups) up to `57ad7df`. This file describes v4.
 
 ---
 
@@ -19,6 +19,7 @@ v1 (bank engines, one read in flight, drain-then-REF) is in the git history up t
 | `ADDR_BITS` | 14 | `BANK_BITS + ROW_BITS + COL_BITS` |
 | `QUEUE_DEPTH` | 8 | entries per queue: 8 reads + 8 writes (`mem_ctrl` parameter `DEPTH`) |
 | `TAG_BITS` | 4 | response tags: at most 15 requests in flight |
+| `BG_BITS` | 1 | bank groups: the bank number's MSB, 2 groups × 2 banks |
 
 The host address is a word address. `ADDR_MAP` picks how it lands on (bank, row, col); every map is a bijection.
 
@@ -45,19 +46,24 @@ Own scaled model, not JEDEC values. A gap counts the clock edges between the two
 | `tRC` | 9 | ACT → ACT, same bank |
 | `tRTP` | 2 | RD → PRE, same bank |
 | `tWR` | 2 | write recovery: WR → PRE ≥ `WL + 1 + tWR` = 4 |
-| `tCCD` | 1 | RD/WR → RD/WR, any bank (one burst per cycle) |
-| `tRRD` | 2 | ACT → ACT, different banks |
+| `tCCD_S` / `tCCD_L` | 1 / 2 | RD/WR → RD/WR, other / same bank group (one burst per cycle) |
+| `tRRD_S` / `tRRD_L` | 2 / 3 | ACT → ACT, other / same bank group, different banks; a REFpb counts as an ACT for `tRRD_S` |
 | `tFAW` | 8 | at most four ACTs in any 8-cycle window |
-| `tWTR` | 4 | WR → RD, any bank |
+| `tWTR_S` / `tWTR_L` | 2 / 4 | WR → RD, other / same bank group |
 | `tRTW` | 4 | RD → WR, any bank (data bus turnaround) |
 | `tCL` | 2 | RD → the edge where the model registers `data_valid` |
 | `RL` | 3 | RD → the edge that samples `data_valid` (`tCL + 1`) |
 | `WL` | 1 | WR → the edge that samples `wdata_en` and `wdata` |
-| `tRFC` | 12 | REF → next command |
-| `tREFI` | 64 | one REF is owed every `tREFI` cycles |
-| `REF_POSTPONE_MAX` | 8 | REFs that may be owed before data is at risk (checker limit) |
+| `tRFC` | 12 | REF (all banks) → next command |
+| `tRFCpb` | 8 | REFpb → next ACT to that bank; the other banks keep working |
+| `tREFI` | 64 | every bank needs one refresh per `tREFI` |
+| `tREFIpb` | 16 | per-bank mode: one REFpb owed every `tREFI / 4`, banks in turn |
+| `REF_POSTPONE_MAX` | 8 | refreshes a bank may be owed before data is at risk (checker limit) |
+| `RAA_IMT` / `RAA_MMT` | 4 / 12 | refresh management (RowHammer): ACT count at which an RFM is due / at which the bank takes no ACT |
 
 With these values a RD's data (edge `t + 3`) and a WR's data (edge `t + 1`) never meet on the data bus: `tRTW` keeps a WR's data after the previous RD's data, and `tWTR` keeps a RD after the previous write's data.
+
+**Refresh management (RFM):** each bank counts its ACTs (RAA, +1 per ACT); every refresh of the bank (REF or REFpb) takes `RAA_IMT` off, never below 0. An ACT to a bank whose RAA has reached `RAA_MMT` is illegal; the controller gives such a bank a REFpb first. The scale follows the rest of the model: at most seven ACTs per bank fit in one `tREFI` (tRC 9), about twice `RAA_IMT`, as in a real device.
 
 **Auto-precharge:** a RD/WR with `ap = 1` closes its bank. The device precharges on the first edge a PRE would be legal (tRAS from the ACT, tRTP after a RD, write recovery after a WR); the next ACT or REF to that bank must be `tRP` after that edge.
 
@@ -74,8 +80,9 @@ With these values a RD's data (edge `t + 3`) and a WR's data (edge `t + 1`) neve
 | `CMD_PRE` | `100` | close `bank` |
 | `CMD_REF` | `101` | refresh all banks; error if a bank is open; no command for `tRFC` |
 | `CMD_PREA` | `110` | close every open bank |
+| `CMD_REFPB` | `111` | refresh one bank; error if it is open; no command to it for `tRFCpb` |
 
-At most one command per cycle.
+Two command buses, both sampled on every edge: the row bus carries ACT, PRE, PREA, REF and REFPB; the column bus carries RD and WR. The column bus has no row: the device uses the bank's open row.
 
 ---
 
@@ -85,7 +92,8 @@ DFI-like: commands with fixed data latencies and no busy signal. The controller 
 
 | Signal | Dir (ctrl) | Meaning |
 |--------|-----------|---------|
-| `dram_cmd`, `dram_bank`, `dram_row`, `dram_col` | out | the command of this cycle |
+| `dram_rcmd`, `dram_rbank`, `dram_row` | out | the row command of this cycle |
+| `dram_ccmd`, `dram_cbank`, `dram_col` | out | the column command of this cycle |
 | `dram_ap` | out | auto-precharge with this RD/WR (`PAGE_CLOSE`) |
 | `dram_wdata_en`, `dram_wdata` | out | write data, `WL` edges after its WR |
 | `dram_data_valid`, `dram_rdata` | in | read data, `RL` edges after its RD, in RD order |
@@ -114,18 +122,21 @@ Simple valid/ready (`host_if` is a combinational pass-through).
 
 ## 6. Scheduler / 스케줄러 (`mc_sched`)
 
-A request stays in its queue (`mc_queue`, one for reads and one for writes) until its RD/WR issues. Every cycle the scheduler looks at all queued requests:
+A request stays in its queue (`mc_queue`, one for reads and one for writes) until its RD/WR issues. Every cycle the scheduler looks at all queued requests and picks one column command and one row command (`CMD_BUS = 2`), or one command of either kind (`CMD_BUS = 1`, v3):
 
 | Step | Rule |
 |------|------|
 | Next command | hit (its row is open) → RD/WR; miss (bank closed) → ACT; conflict (another row open) → PRE |
-| Ready | the next command meets every rule: bank (`mc_bank`: tRCD, tRP, tRAS, tRC, tRTP, write recovery), channel (`mc_chan`: tCCD, tRRD, tFAW, tWTR, tRTW, tRFC), and for a RD a free read-return slot (`RD_PIPE`) |
+| Ready | the next command meets every rule: bank (`mc_bank`: tRCD, tRP, tRAS, tRC, tRTP, write recovery, tRFCpb, RAA below `RAA_MMT` for an ACT), channel per bank group (`mc_chan`: tCCD_S/L, tRRD_S/L, tFAW, tWTR_S/L, tRTW, tRFC), and for a RD a free read-return slot (`RD_PIPE`) |
 | Eligible queue | `WDRAIN = 1`: the queue `mc_wdrain` selects (§ 6.1). `WDRAIN = 0`: both queues, oldest first across them as in v2 |
-| Pick | 1. the oldest ready RD/WR of the eligible queue (FR-FCFS) · 2. its oldest ready ACT/PRE · 3. the other queue's oldest ready RD/WR · 4. the other queue's ACT, or PRE of a row nobody hits, on a bank the eligible queue does not need · 5. a timer PRE (`PAGE_TIMER`). FCFS orders 1 and 2 by age |
+| Pick, column bus | the oldest ready RD/WR of the eligible queue, else of the other queue |
+| Pick, row bus | 1. a ready refresh command (PREA, REF, or PRE and REFpb of the bank being refreshed) · 2. an RFM command (PRE, REFpb) · 3. the eligible queue's oldest ready ACT/PRE · 4. the other queue's ACT, or PRE of a row nobody hits, on a bank the eligible queue does not need · 5. a timer PRE (`PAGE_TIMER`). No PRE goes to a bank that has a column command ready |
+| One bus (`CMD_BUS = 1`) | refresh, then RFM, then the column pick over the row pick (FR-FCFS) or the older of the two (FCFS) |
 | Row protection | FR-FCFS: no PRE while any queued request (either queue) hits the open row. FCFS: no PRE while an older one does |
 | Same address | a write waits for every older write to its address (`q_dep`); reads need no order among themselves |
 | Starvation | when the oldest eligible request has waited `STARVE_LIMIT` cycles, selection is oldest-first and, if it needs a PRE, its bank stops serving younger hits. A write that has waited that long also switches `mc_wdrain` to write mode |
-| Refresh hold | no ACT and no RD/WR: PREA once every open bank may precharge, then REF once every bank has met tRP and tRC |
+| Refresh hold | `REF_ALL`: no ACT and no RD/WR on any bank; PREA, then REF. `REF_BANK`: the same for the bank being refreshed only, with PRE and REFpb |
+| RFM | a bank at `RAA_MMT` takes no ACT; once no queued request hits its row it is closed and gets a REFpb. With `RFM_EARLY`, a closed bank at `RAA_IMT` that no queued request needs also gets one |
 
 **Age:** each queue keeps an age matrix, `q_older[j][i] = 1` when entry j was accepted before entry i, written at each push; `mc_xage` keeps `w_older_r[w][r]` between the two queues. The oldest member of any set of entries is the one no other member is older than: one AND-OR level per entry, no compare chain.
 
@@ -154,14 +165,14 @@ The mode sets priority, not a ban: the other queue still gets a slot nothing in 
 
 ## 7. Refresh policy / 리프레시 (`mc_refresh`)
 
-| Item | Policy |
-|------|--------|
-| Owed | a free-running counter adds one owed REF every `tREFI` cycles, whatever the traffic does; each REF pays one back. The average REF interval is `tREFI` by construction |
-| When | when one is owed and both queues are empty, or at once when `REF_URGENT` (4) are owed |
-| Sequence | `hold` goes high and stays high until the REF issues: no ACT, no RD/WR; PREA once every open bank meets tRAS, tRTP and write recovery; REF once every bank meets tRP |
-| After | the controller blocks every command for `tRFC` itself (`mc_chan`) |
+| Item | `REF_BANK` (default) | `REF_ALL` (v3) |
+|------|------|------|
+| Owed | one REFpb every `tREFIpb` = 16 cycles, banks in turn, so each bank gets one per `tREFI` | one REF every `tREFI` cycles |
+| When | when one is owed and no queued request needs that bank, or at once when `REF_URGENT` (4) are owed | when one is owed and both queues are empty, or at once when `REF_URGENT` are owed |
+| Sequence | that bank only: no ACT, no RD/WR; PRE once it meets tRAS, tRTP and write recovery; REFpb once it meets tRP | every bank: PREA, then REF |
+| After | that bank takes no ACT for `tRFCpb` (8) (`mc_bank`); the other banks keep working | every command waits `tRFC` (12) (`mc_chan`) |
 
-With `REF_URGENT = 4` at most 4 REFs are owed (checker limit 8).
+The owed counter runs whatever the traffic does, so every bank is refreshed once per `tREFI` on average in both modes. With `REF_URGENT = 4` at most 4 refreshes are owed (checker limit 8 per bank).
 
 ---
 
@@ -176,11 +187,14 @@ With `REF_URGENT = 4` at most 4 REFs are owed (checker limit 8).
 | `PAGE_POLICY` | `PAGE_OPEN` | `PAGE_OPEN`, `PAGE_CLOSE`, `PAGE_TIMER` |
 | `PAGE_TIMEOUT` | 16 | idle cycles before a timer PRE |
 | `ADDR_MAP` | `MAP_XOR` | `MAP_XOR`, `MAP_RBC`, `MAP_RCB`, `MAP_BRC` |
+| `CMD_BUS` | 2 | 2 = row and column command buses, 1 = one command per cycle (v3) |
+| `REF_MODE` | `REF_BANK` | `REF_BANK` = per-bank REFpb, `REF_ALL` = PREA + REF (v3) |
+| `RFM_EARLY` | 1 | 1 = RFM at `RAA_IMT` for idle banks too, 0 = only at `RAA_MMT` |
 | `RD_PIPE` | 4 | RDs on the DRAM bus at once (v1 behaved like 1) |
 | `STARVE_LIMIT` | 160 | cycles before the oldest request overrides row hits (≤ 255) |
 | `REF_URGENT` | 4 | owed REFs that stop new traffic |
 
-`mem_ctrl_top` and `tb_mem_ctrl_rand` pass them through; the regression builds eleven variants (`make regress`).
+`mem_ctrl_top` and `tb_mem_ctrl_rand` pass them through; the regression builds fifteen variants (`make regress`).
 
 ---
 
@@ -193,12 +207,12 @@ With `REF_URGENT = 4` at most 4 REFs are owed (checker limit 8).
 | `mc_queue` ×2 | Read queue and write queue: entries, age matrix, same-address match, write order (`q_dep`), wait counters |
 | `mc_xage` | Age between the two queues |
 | `mc_wdrain` | Read mode / write batch |
-| `mc_bank` ×4 | Open row, same-bank timing counters, auto-precharge, idle time |
-| `mc_chan` | Channel timing counters, tFAW window, tRFC blackout |
-| `mc_refresh` | Owed REFs and the refresh hold |
-| `mc_sched` | Next command per request, readiness, pick, auto-precharge decision, timer PRE, PREA/REF |
+| `mc_bank` ×4 | Open row, same-bank timing counters, auto-precharge, tRFCpb, idle time, RAA count |
+| `mc_chan` | Channel timing counters per bank group, tFAW window, tRFC blackout |
+| `mc_refresh` | Owed refreshes, the bank to refresh next, the refresh hold |
+| `mc_sched` | Next command per request, readiness, column and row picks, auto-precharge decision, timer PRE, refresh and RFM commands |
 | `mc_resp` | Tags, read-return FIFO, write-data pipeline, in-order response buffer |
-| `dram_model` | Banks, open rows, memory array, read/write data pipelines, `access_err` |
+| `dram_model` | Banks, open rows, memory array, two command buses, read/write data pipelines, tRFC and tRFCpb, `access_err` |
 | `mem_ctrl_top` | Instantiates `host_if`, `mem_ctrl`, `dram_model` |
 
 ---
@@ -207,9 +221,9 @@ With `REF_URGENT = 4` at most 4 REFs are owed (checker limit 8).
 
 | Item | Status |
 |------|--------|
-| v3 controller, parameters above | done |
+| v4 controller, parameters above | done |
 | Timing and protocol checker, host SVA (bind) | `tb/dram_timing_checker.sv`, `tb/host_if_checker.sv` |
-| Directed TB (6 scenarios) and random TB (6 patterns, 26 bins, 11 build variants) | `tb/` |
+| Directed TB (6 scenarios) and random TB (6 patterns, 32 bins, 15 build variants) | `tb/` |
 | Area and timing flow | `make ppa` (`syn/ppa.sh`) |
 | Negative tests that drive `dram_model` directly | TODO |
-| Separate row and column command buses, bank groups, per-bank refresh | TODO (next step) |
+| Traffic × policy matrix, area and timing per feature | TODO (next step) |

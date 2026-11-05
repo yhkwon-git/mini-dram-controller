@@ -178,6 +178,10 @@ package mc_tb_pkg;
       if      (pattern_name == "seq")     pattern = P_SEQ;
       else if (pattern_name == "rand")    pattern = P_RAND;
       else if (pattern_name == "stride")  pattern = P_STRIDE;
+      else if (pattern_name == "stride64") begin  // a whole row of every bank per step
+        pattern = P_STRIDE;
+        stride  = 64;
+      end
       else if (pattern_name == "hotbank") pattern = P_HOTBANK;
       else if (pattern_name == "rowhit")  pattern = P_ROWHIT;
       else if (pattern_name == "mixed")   pattern = P_MIXED;

@@ -5,7 +5,7 @@
 // classifies every column command on the DRAM pins as hit, miss or conflict.
 //
 // Run:      make sim-rand PATTERN=mixed SEED=1 N=2000      or      make regress
-// Plusargs: +PATTERN=seq|rand|stride|hotbank|rowhit|mixed  +SEED=  +N=  +RD_PCT=
+// Plusargs: +PATTERN=seq|rand|stride|stride64|hotbank|rowhit|mixed  +SEED=  +N=  +RD_PCT=
 //           +GAP_MAX=  +BP_PCT=  +BP_MAX=  +STRIDE=  +HOT_PCT=  +REUSE_PCT=  +CSV=
 `timescale 1ns/1ps
 
@@ -161,7 +161,7 @@ module tb_mem_ctrl_rand
     env = new(hif);
     env.cfg.addr_map = P_ADDR_MAP;
     if (!env.cfg.from_plusargs())
-      $fatal(1, "[RAND] unknown +PATTERN=%s (seq, rand, stride, hotbank, rowhit, mixed)",
+      $fatal(1, "[RAND] unknown +PATTERN=%s (seq, rand, stride, stride64, hotbank, rowhit, mixed)",
              env.cfg.pattern_name);
     env.build();
     env.drv.idle();

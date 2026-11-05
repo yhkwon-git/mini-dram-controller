@@ -13,7 +13,7 @@ import statistics
 import sys
 from collections import OrderedDict
 
-PATTERN_ORDER = ["seq", "rowhit", "mixed", "rand", "hotbank", "stride"]
+PATTERN_ORDER = ["seq", "rowhit", "mixed", "rand", "hotbank", "stride", "stride64"]
 
 
 def load(path):

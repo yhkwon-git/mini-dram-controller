@@ -7,6 +7,8 @@
 #   make sim-rand         # one random run: PATTERN=mixed SEED=1 N=2000
 #   make regress          # random regression: every pattern x SEEDS seeds x N requests
 #   make cov              # line / branch / toggle coverage of directed + random runs
+#   make matrix           # traffic x build matrix, two loads (docs/analysis.md)
+#   make ppa-sweep        # area and timing of every build
 #   make lint             # Verilator --lint-only on the RTL
 #   make sim-cocotb       # optional cocotb smoke test (cocotb >= 2.0)
 #   make clean
@@ -71,7 +73,7 @@ ifeq ($(WAVES),1)
 endif
 
 .PHONY: help sim rand-build rand-build-quiet rand-variants sim-rand regress cov ppa lint sim-cocotb clean \
-        check-tools check-verilator cov-build-directed
+        check-tools check-verilator cov-build-directed matrix ppa-sweep
 
 help:
 	@echo "Targets:"
@@ -81,6 +83,8 @@ help:
 	@echo "  make regress       - random regression ($(SEEDS) seeds x $(N) requests per pattern, plus variants)"
 	@echo "  make cov           - line / branch / toggle coverage, directed + random"
 	@echo "  make ppa           - area and timing of mem_ctrl (sv2v, Yosys, Nangate45, OpenSTA)"
+	@echo "  make matrix        - every build x seven traffic patterns x two loads (docs/analysis.md)"
+	@echo "  make ppa-sweep     - area and timing of every build's parameters"
 	@echo "  make lint          - Verilator lint-only on the RTL"
 	@echo "  make sim-cocotb    - optional cocotb smoke test (cocotb >= 2.0)"
 	@echo "  make check-tools   - print tool availability"
@@ -166,6 +170,33 @@ cov: check-verilator
 # if the tools are not where syn/ppa.sh expects them.
 ppa:
 	OUT=build/ppa bash syn/ppa.sh
+
+# Traffic x build matrix for docs/analysis.md: every build, seven patterns
+# (stride64 added), MATRIX_SEEDS seeds, under the regression load and
+# saturated (no request gap, no back-pressure).
+MATRIX_SEEDS     ?= 10
+MATRIX_SAT_SEEDS ?= 3
+MATRIX_PATTERNS  ?= seq rowhit mixed rand hotbank stride stride64
+MATRIX_RUNS = default=$(RAND_DIR)/sim_rand:SEEDS $(foreach n,$(VARIANT_NAMES),$(n)=$(RAND_DIR)_$(n)/sim_rand:SEEDS)
+matrix: check-verilator
+	@$(MAKE) --no-print-directory -j$(JOBS) rand-build-quiet rand-variants
+	RUNS="$(subst SEEDS,$(MATRIX_SEEDS),$(MATRIX_RUNS))" OUT=build/matrix/load N=$(N) \
+	  PATTERNS="$(MATRIX_PATTERNS)" JOBS=$(JOBS) bash tb/run_regress.sh
+	RUNS="$(subst SEEDS,$(MATRIX_SAT_SEEDS),$(MATRIX_RUNS))" OUT=build/matrix/sat N=$(N) \
+	  PATTERNS="$(MATRIX_PATTERNS)" JOBS=$(JOBS) EXTRA="+GAP_MAX=0 +BP_PCT=0" bash tb/run_regress.sh
+	$(PYTHON) tools/matrix_report.py build/matrix/load/regress.csv build/matrix/sat/regress.csv
+
+# Area and timing per build: the mem_ctrl parameters of each variant
+# (name:-GP_X=v,... -> X=v), JOBS syntheses at once.
+ppa_params = $(subst -GP_,,$(call variant_flags,$(1)))
+ppa-sweep:
+	@mkdir -p build/ppa_sweep
+	@for n in default $(VARIANT_NAMES); do echo "$$n"; done | xargs -P $(JOBS) -I{} sh -c \
+	  'p=$$(make -s --no-print-directory ppa-params-{}); OUT=build/ppa_sweep/{} PARAMS="$$p" bash syn/ppa.sh > build/ppa_sweep/{}.log 2>&1 || echo "FAIL ppa {}"'
+	@$(PYTHON) tools/matrix_report.py --ppa build/ppa_sweep
+
+ppa-params-%:
+	@echo "$(call ppa_params,$*)"
 
 check-verilator:
 	@command -v $(VERILATOR) >/dev/null 2>&1 || { \

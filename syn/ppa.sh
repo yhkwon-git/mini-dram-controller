@@ -3,6 +3,7 @@
 # `make ppa` runs it from the repository root; results go to $OUT.
 #   SV2V  sv2v binary                 (default: sv2v)
 #   LIB   Nangate45 typical .lib[.gz] (default: the OpenSTA example library)
+#   PARAMS mem_ctrl parameter overrides, e.g. "CMD_BUS=1 REF_MODE=0"
 # The numbers are for comparing versions: no wires, no clock tree, typical corner.
 set -euo pipefail
 
@@ -20,8 +21,13 @@ esac
 
 "$SV2V" "${SRCS[@]}" > "$OUT/mem_ctrl.v"
 
+CHPARAM=""
+for kv in ${PARAMS:-}; do CHPARAM="$CHPARAM -set ${kv%%=*} ${kv#*=}"; done
+[ -n "$CHPARAM" ] && CHPARAM="chparam$CHPARAM mem_ctrl;"
+
 yosys -q -l "$OUT/yosys.log" -p "
   read_verilog $OUT/mem_ctrl.v;
+  $CHPARAM
   hierarchy -check -top mem_ctrl;
   synth -top mem_ctrl -flatten;
   tee -q -o $OUT/stat_generic.txt stat;

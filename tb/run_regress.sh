@@ -3,6 +3,7 @@
 # `make regress` builds the binaries and calls this script.
 #   RUNS  space-separated "name=binary:seeds" items, one per controller build
 #   JOBS  runs at once (default: the number of CPUs)
+#   EXTRA plusargs added to every run, e.g. "+GAP_MAX=0 +BP_PCT=0" (saturated)
 # Each run writes its own CSV line; the lines are joined into
 # $OUT/regress.csv in job order. A passing run's log is deleted; a failing
 # run keeps its log in $OUT.
@@ -13,6 +14,7 @@ N=${N:-2000}
 PATTERNS=${PATTERNS:-"seq rowhit mixed rand hotbank stride"}
 RUNS=${RUNS:-"default=obj_dir_rand/sim_rand:20"}
 JOBS=${JOBS:-$(nproc 2>/dev/null || echo 1)}
+EXTRA=${EXTRA:-}
 
 mkdir -p "$OUT/runs"
 rm -f "$OUT"/regress.csv "$OUT"/*.log "$OUT"/runs/*
@@ -34,7 +36,8 @@ done
 run_one() {
   local name=$1 bin=$2 p=$3 s=$4
   local log="$OUT/${name}_${p}_seed${s}.log"
-  if "$bin" +CONFIG="$name" +PATTERN="$p" +SEED="$s" +N="$N" \
+  # shellcheck disable=SC2086
+  if "$bin" +CONFIG="$name" +PATTERN="$p" +SEED="$s" +N="$N" $EXTRA \
        +CSV="$OUT/runs/${name}_${p}_${s}.csv" > "$log" 2>&1; then
     rm -f "$log"
   else
@@ -42,7 +45,7 @@ run_one() {
   fi
 }
 export -f run_one
-export OUT N
+export OUT N EXTRA
 
 xargs -P "$JOBS" -L 1 bash -c 'run_one "$@"' _ < "$jobs_file"
 

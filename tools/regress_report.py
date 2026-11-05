@@ -71,21 +71,30 @@ def coverage_table(rows):
 
 
 def config_table(rows):
-    """One line per controller build: checks, and data bus busy / latency averaged over patterns."""
+    """One line per controller build: checks, and data bus busy / latency averaged over patterns.
+    CSVs from v3 on also carry read latency and RD<->WR turnarounds."""
     configs = list(OrderedDict.fromkeys(r.get("config", "default") for r in rows))
-    print("| build | runs | PASS | data mismatches | violations | data bus busy % | latency avg |")
-    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+    v3 = "rd_lat_avg" in rows[0]
+    extra_h = " read latency avg | turnarounds |" if v3 else ""
+    extra_a = " ---: | ---: |" if v3 else ""
+    print("| build | runs | PASS | data mismatches | violations | data bus busy % | latency avg |" + extra_h)
+    print("| --- | ---: | ---: | ---: | ---: | ---: | ---: |" + extra_a)
     for c in configs:
         runs = [r for r in rows if r.get("config", "default") == c]
-        per_pattern = group(runs).values()
-        busy = statistics.fmean(mean(g, "util_pct") for g in per_pattern)
-        lat = statistics.fmean(mean(g, "lat_avg") for g in group(runs).values())
+        groups = list(group(runs).values())
+        busy = statistics.fmean(mean(g, "util_pct") for g in groups)
+        lat = statistics.fmean(mean(g, "lat_avg") for g in groups)
         passed = sum(r["result"] == "PASS" for r in runs)
+        extra = ""
+        if v3:
+            rd_lat = statistics.fmean(mean(g, "rd_lat_avg") for g in groups)
+            turns = statistics.fmean(mean(g, "turns") for g in groups)
+            extra = f" {rd_lat:.1f} | {turns:,.0f} |"
         print(f"| {c} | {len(runs)} | {passed}/{len(runs)} | {total(runs, 'mismatches')} | "
-              f"{total(runs, 'violations')} | {busy:.1f} | {lat:.1f} |")
+              f"{total(runs, 'violations')} | {busy:.1f} | {lat:.1f} |" + extra)
 
 
-def plots(groups, outdir, baseline=None, base_label="v1"):
+def plots(groups, outdir, baseline=None, base_label="v1", label="v2", compare_name="regress_v1_v2.png"):
     try:
         import plot_regress  # tools/plot_regress.py
     except ImportError as exc:
@@ -93,7 +102,8 @@ def plots(groups, outdir, baseline=None, base_label="v1"):
     plot_regress.draw(groups, outdir)
     if baseline:
         base = {r["pattern"]: r for r in load(baseline)}
-        plot_regress.draw_compare(groups, base, outdir, base_label=base_label)
+        plot_regress.draw_compare(groups, base, outdir, name=compare_name,
+                                  base_label=base_label, new_label=label)
 
 
 def main():
@@ -103,6 +113,8 @@ def main():
     ap.add_argument("--baseline", metavar="CSV",
                     help="per-pattern means of an earlier controller; adds a comparison chart")
     ap.add_argument("--baseline-label", default="v1")
+    ap.add_argument("--label", default="v2", help="name of this run in the comparison chart")
+    ap.add_argument("--compare-name", default="regress_v1_v2.png", help="file name of the comparison chart")
     args = ap.parse_args()
     rows = load(args.csv)
     if not rows:
@@ -120,7 +132,7 @@ def main():
     print("\nall builds:\n")
     coverage_table(rows)
     if args.plots:
-        plots(groups, args.plots, args.baseline, args.baseline_label)
+        plots(groups, args.plots, args.baseline, args.baseline_label, args.label, args.compare_name)
 
 
 if __name__ == "__main__":

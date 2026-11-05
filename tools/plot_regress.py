@@ -165,11 +165,15 @@ def draw_compare(groups, baseline, outdir, name="regress_v1_v2.png",
     _header(fig, f"{base_label} and {new_label} under the same random traffic",
             f"Mean of {seeds} seeds per pattern, {n:,} requests per run, request gap 0-2 cycles.")
 
+    # Latency axis: at least 120, and room past the longest bar
+    lat_top = max([float(baseline[p]["lat_avg"]) for p in names] +
+                  [_mean(groups[p], "lat_avg") for p in names])
+    lat_max = max(120, 20 * (int(lat_top + 5) // 20 + 1))
     panels = [
         (axes[0][0], "Data bus busy, % of cycles", "util_pct", 40, 10),
         (axes[0][1], "REF interval, average cycles", "ref_int_avg", 160, 40),
         (axes[1][0], "Row hit rate, %", "hit_pct", 100, 20),
-        (axes[1][1], "Latency, average cycles", "lat_avg", 120, 20),
+        (axes[1][1], "Latency, average cycles", "lat_avg", lat_max, 20 if lat_max <= 120 else 40),
     ]
     for ax, title, _key, xmax, step in panels:
         _frame(ax, title, xmax, step, pad=22 if ax in (axes[0][0], axes[0][1]) else 10)

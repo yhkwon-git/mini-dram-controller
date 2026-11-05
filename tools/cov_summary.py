@@ -13,8 +13,8 @@ import sys
 from collections import defaultdict
 
 KINDS = [("line", "Line"), ("branch", "Branch"), ("expr", "Expr"), ("toggle", "Toggle")]
-MODULE_ORDER = ["mem_ctrl", "mc_queue", "mc_sched", "mc_bank", "mc_chan", "mc_refresh",
-                "mc_resp", "dram_model", "mem_ctrl_top", "host_if"]
+MODULE_ORDER = ["mem_ctrl", "mc_queue", "mc_xage", "mc_wdrain", "mc_sched", "mc_bank", "mc_chan",
+                "mc_refresh", "mc_resp", "dram_model", "mem_ctrl_top", "host_if"]
 
 
 def points(path):

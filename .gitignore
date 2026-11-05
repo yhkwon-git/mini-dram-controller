@@ -1,5 +1,8 @@
 # Simulation / Verilator
 obj_dir/
+obj_dir_*/
+build/
+coverage.dat
 sim_build/
 *.vcd
 *.fst

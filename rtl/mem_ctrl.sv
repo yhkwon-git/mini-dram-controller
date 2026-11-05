@@ -55,8 +55,9 @@ module mem_ctrl
   logic [DEPTH-1:0][DATA_BITS-1:0] q_wdata;
   logic [DEPTH-1:0][TAG_BITS-1:0]  q_tag;
   logic [DEPTH-1:0][7:0]           q_wait;
+  logic [DEPTH-1:0][DEPTH-1:0]     q_older, q_dep;
 
-  logic [TAG_BITS-1:0]             tag_alloc, tag_retire;
+  logic [TAG_BITS-1:0]             tag_alloc;
   logic                            tag_free, rd_slot_ok;
 
   logic [NUM_BANKS-1:0]                bank_open, bank_act_ok, bank_col_ok, bank_pre_ok;
@@ -94,7 +95,9 @@ module mem_ctrl
     .q_col      (q_col),
     .q_wdata    (q_wdata),
     .q_tag      (q_tag),
-    .q_wait     (q_wait)
+    .q_wait     (q_wait),
+    .q_older    (q_older),
+    .q_dep      (q_dep)
   );
 
   for (genvar b = 0; b < NUM_BANKS; b++) begin : g_bank
@@ -144,9 +147,9 @@ module mem_ctrl
     .q_bank      (q_bank),
     .q_row       (q_row),
     .q_col       (q_col),
-    .q_tag       (q_tag),
     .q_wait      (q_wait),
-    .tag_retire  (tag_retire),
+    .q_older     (q_older),
+    .q_dep       (q_dep),
     .bank_open   (bank_open),
     .bank_row    (bank_row),
     .bank_act_ok (bank_act_ok),
@@ -171,7 +174,6 @@ module mem_ctrl
     .rst_n           (rst_n),
     .acc             (acc),
     .tag_alloc       (tag_alloc),
-    .tag_retire      (tag_retire),
     .tag_free        (tag_free),
     .rd_issue        (cmd == CMD_RD),
     .wr_issue        (cmd == CMD_WR),

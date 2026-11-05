@@ -12,10 +12,13 @@
 //
 // Two guards:
 // - Same address: a RD/WR waits until every older request to the same
-//   address has issued its own, so a read always sees earlier writes.
+//   address has issued its own (q_dep), so a read always sees earlier writes.
 // - Starvation: once the oldest request has waited STARVE_LIMIT cycles,
 //   selection becomes oldest-first and, if it needs a PRE, its bank stops
 //   serving younger hits.
+//
+// "Oldest" comes from the queue's age matrix: the oldest member of a set is
+// the one that no other member is older than, an AND-OR over the set.
 //
 // Refresh (ref_hold): no ACT and no RD/WR. PREA once every open bank may
 // precharge, then REF once every bank has met tRP and tRC.
@@ -33,9 +36,9 @@ module mc_sched
   input  logic [DEPTH-1:0][BANK_BITS-1:0]     q_bank,
   input  logic [DEPTH-1:0][ROW_BITS-1:0]      q_row,
   input  logic [DEPTH-1:0][COL_BITS-1:0]      q_col,
-  input  logic [DEPTH-1:0][TAG_BITS-1:0]      q_tag,
   input  logic [DEPTH-1:0][7:0]               q_wait,
-  input  logic [TAG_BITS-1:0]                 tag_retire,
+  input  logic [DEPTH-1:0][DEPTH-1:0]         q_older,
+  input  logic [DEPTH-1:0][DEPTH-1:0]         q_dep,
   input  logic [NUM_BANKS-1:0]                bank_open,
   input  logic [NUM_BANKS-1:0][ROW_BITS-1:0]  bank_row,
   input  logic [NUM_BANKS-1:0]                bank_act_ok,
@@ -57,51 +60,53 @@ module mc_sched
 
   localparam int AW = $clog2(DEPTH);
 
-  logic [TAG_BITS-1:0]  age [DEPTH];  // 0 = the oldest request still in flight
-  logic [DEPTH-1:0]     hit, miss, conf, hazard, guarded, col_rdy, row_rdy;
-  logic                 any_valid, starving;
-  logic [AW-1:0]        oldest;
+  logic [DEPTH-1:0]     hit, miss, conf, hazard, guarded, waited, col_rdy, row_rdy;
+  logic [DEPTH-1:0]     old_sel, col_sel, row_sel;
+  logic                 starving, col_first, use_col;
   logic [NUM_BANKS-1:0] starve_bank;
-  logic                 col_found, row_found, use_col;
   logic [AW-1:0]        col_pick, row_pick;
 
-  // Age and the oldest valid request
+  // One-hot: the member of m that no other member of m is older than.
+  function automatic logic [DEPTH-1:0] oldest_of(input logic [DEPTH-1:0] m);
+    logic [DEPTH-1:0] r;
+    for (int i = 0; i < DEPTH; i++) begin
+      r[i] = m[i];
+      for (int j = 0; j < DEPTH; j++)
+        if (j != i && m[j] && q_older[j][i]) r[i] = 1'b0;
+    end
+    return r;
+  endfunction
+
+  function automatic logic [AW-1:0] index_of(input logic [DEPTH-1:0] onehot);
+    logic [AW-1:0] r;
+    r = '0;
+    for (int i = 0; i < DEPTH; i++)
+      if (onehot[i]) r = r | AW'(i);
+    return r;
+  endfunction
+
   always_comb begin
-    for (int i = 0; i < DEPTH; i++) age[i] = q_tag[i] - tag_retire;
-    any_valid = 1'b0;
-    oldest    = '0;
     for (int i = 0; i < DEPTH; i++) begin
-      if (q_valid[i] && (!any_valid || age[i] < age[oldest])) begin
-        any_valid = 1'b1;
-        oldest    = AW'(i);
-      end
-    end
-  end
-
-  // Next command of each request and whether it is ready
-  always_comb begin
-    for (int i = 0; i < DEPTH; i++) begin
-      hit[i]  = q_valid[i] &&  bank_open[q_bank[i]] && (bank_row[q_bank[i]] == q_row[i]);
-      conf[i] = q_valid[i] &&  bank_open[q_bank[i]] && (bank_row[q_bank[i]] != q_row[i]);
-      miss[i] = q_valid[i] && !bank_open[q_bank[i]];
+      hit[i]    = q_valid[i] &&  bank_open[q_bank[i]] && (bank_row[q_bank[i]] == q_row[i]);
+      conf[i]   = q_valid[i] &&  bank_open[q_bank[i]] && (bank_row[q_bank[i]] != q_row[i]);
+      miss[i]   = q_valid[i] && !bank_open[q_bank[i]];
+      hazard[i] = |(q_dep[i] & q_valid);
+      waited[i] = q_wait[i] >= 8'(STARVE_LIMIT);
     end
 
+    // A hit on the same bank keeps the row open: any hit for FR-FCFS, an older one for FCFS
     for (int i = 0; i < DEPTH; i++) begin
-      hazard[i]  = 1'b0;  // an older request to the same address has not issued yet
-      guarded[i] = 1'b0;  // a hit on this request's bank keeps the row open
-      for (int j = 0; j < DEPTH; j++) begin
-        if (j != i && q_valid[j] && q_bank[j] == q_bank[i]) begin
-          if (q_row[j] == q_row[i] && q_col[j] == q_col[i] && age[j] < age[i])
-            hazard[i] = 1'b1;
-          if (hit[j] && (FR_FCFS || age[j] < age[i]))
-            guarded[i] = 1'b1;
-        end
-      end
+      guarded[i] = 1'b0;
+      for (int j = 0; j < DEPTH; j++)
+        if (j != i && hit[j] && q_bank[j] == q_bank[i] && (FR_FCFS || q_older[j][i]))
+          guarded[i] = 1'b1;
     end
 
-    starving    = any_valid && (q_wait[oldest] >= 8'(STARVE_LIMIT));
+    old_sel     = oldest_of(q_valid);
+    starving    = |(old_sel & waited);
     starve_bank = '0;
-    if (starving && conf[oldest]) starve_bank[q_bank[oldest]] = 1'b1;
+    for (int i = 0; i < DEPTH; i++)
+      if (starving && old_sel[i] && conf[i]) starve_bank[q_bank[i]] = 1'b1;
 
     for (int i = 0; i < DEPTH; i++) begin
       col_rdy[i] = hit[i] && !hazard[i] && !ref_hold && bank_col_ok[q_bank[i]] &&
@@ -112,28 +117,19 @@ module mc_sched
                      (conf[i] && bank_pre_ok[q_bank[i]] && chan_any_ok &&
                       (!guarded[i] || starve_bank[q_bank[i]])));
     end
-  end
 
-  // Oldest ready RD/WR and oldest ready ACT/PRE
-  always_comb begin
-    col_found = 1'b0;
-    col_pick  = '0;
-    row_found = 1'b0;
-    row_pick  = '0;
-    for (int i = 0; i < DEPTH; i++) begin
-      if (col_rdy[i] && (!col_found || age[i] < age[col_pick])) begin
-        col_found = 1'b1;
-        col_pick  = AW'(i);
-      end
-      if (row_rdy[i] && (!row_found || age[i] < age[row_pick])) begin
-        row_found = 1'b1;
-        row_pick  = AW'(i);
-      end
-    end
+    col_sel   = oldest_of(col_rdy);
+    row_sel   = oldest_of(row_rdy);
+    col_first = 1'b0;
+    for (int i = 0; i < DEPTH; i++)
+      for (int j = 0; j < DEPTH; j++)
+        if (col_sel[i] && row_sel[j] && q_older[i][j]) col_first = 1'b1;
     if (FR_FCFS && !starving)
-      use_col = col_found;
+      use_col = |col_rdy;
     else
-      use_col = col_found && (!row_found || age[col_pick] < age[row_pick]);
+      use_col = |col_rdy && (!(|row_rdy) || col_first);
+    col_pick = index_of(col_sel);
+    row_pick = index_of(row_sel);
   end
 
   always_comb begin
@@ -156,7 +152,7 @@ module mc_sched
       cmd_col   = q_col[col_pick];
       serve     = 1'b1;
       serve_idx = col_pick;
-    end else if (row_found) begin
+    end else if (|row_rdy) begin
       cmd      = miss[row_pick] ? CMD_ACT : CMD_PRE;
       cmd_bank = q_bank[row_pick];
       cmd_row  = q_row[row_pick];

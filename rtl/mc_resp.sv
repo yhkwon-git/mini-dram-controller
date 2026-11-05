@@ -16,7 +16,6 @@ module mc_resp
   input  logic                 rst_n,
   input  logic                 acc,          // a request is accepted on this edge
   output logic [TAG_BITS-1:0]  tag_alloc,    // tag the next accepted request gets
-  output logic [TAG_BITS-1:0]  tag_retire,   // oldest request not yet answered
   output logic                 tag_free,     // fewer than 2^TAG_BITS - 1 in flight
   input  logic                 rd_issue,
   input  logic                 wr_issue,
@@ -43,6 +42,7 @@ module mc_resp
   logic [TAG_BITS-1:0]  wp_tag [WL];
   logic [DATA_BITS-1:0] wp_d   [WL];
 
+  logic [TAG_BITS-1:0]  tag_retire;  // oldest request not yet answered
   logic                 done [TAG_N];
   logic [DATA_BITS-1:0] data [TAG_N];
 

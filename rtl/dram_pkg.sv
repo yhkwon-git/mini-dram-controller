@@ -1,4 +1,4 @@
-// Mini-DRAM package: geometry, timing, commands, page policies, address maps (docs/spec.md).
+// Mini-DRAM package: geometry, bank groups, timing, commands, policies, address maps (docs/spec.md).
 `timescale 1ns/1ps
 
 package dram_pkg;
@@ -15,6 +15,11 @@ package dram_pkg;
   localparam int QUEUE_DEPTH = 8;    // entries per queue: 8 reads + 8 writes (mem_ctrl DEPTH)
   localparam int TAG_BITS    = 4;    // response tags: at most 15 requests in flight
 
+  // Bank groups: the bank number's MSB. Two commands in one group need the
+  // longer (_L) spacing, in different groups the shorter (_S) one.
+  localparam int BG_BITS = 1;
+  localparam int NUM_BG  = 1 << BG_BITS;   // 2 groups x 2 banks
+
   // ---------------------------------------------------------------------------
   // Timing in controller cycles. Own scaled model, not JEDEC values.
   // A gap counts the clock edges between the two edges that sample the events.
@@ -26,33 +31,60 @@ package dram_pkg;
   localparam int tRC  = 9;   // ACT -> ACT
   localparam int tRTP = 2;   // RD -> PRE
   localparam int tWR  = 2;   // write recovery: WR -> PRE >= WL + 1 + tWR
+  // Bank groups: _S across groups, _L within one group
+  localparam int tCCD_S = 1;  // RD/WR -> RD/WR (one burst per cycle)
+  localparam int tCCD_L = 2;
+  localparam int tRRD_S = 2;  // ACT -> ACT, different banks; a REFpb counts as an ACT here
+  localparam int tRRD_L = 3;
+  localparam int tWTR_S = 2;  // WR -> RD
+  localparam int tWTR_L = 4;
   // Any bank
-  localparam int tCCD = 1;   // RD/WR -> RD/WR (one burst per cycle)
-  localparam int tRRD = 2;   // ACT -> ACT, different banks
-  localparam int tFAW = 8;   // at most four ACTs in any tFAW window
-  localparam int tWTR = 4;   // WR -> RD
-  localparam int tRTW = 4;   // RD -> WR (data bus turnaround)
+  localparam int tFAW = 8;    // at most four ACTs in any tFAW window
+  localparam int tRTW = 4;    // RD -> WR (data bus turnaround)
   // Data
   localparam int tCL  = 2;        // RD -> the edge where the model registers data_valid
   localparam int RL   = tCL + 1;  // RD -> the edge that samples data_valid
   localparam int WL   = 1;        // WR -> the edge that samples wdata_en and wdata
   // Refresh
   localparam int tRFC  = 12;  // REF -> next command
-  localparam int tREFI = 64;  // one REF is owed every tREFI cycles
-  localparam int REF_POSTPONE_MAX = 8;  // REFs that may be owed before data is at risk
+  localparam int tREFI = 64;  // every bank needs one refresh per tREFI
+  localparam int REF_POSTPONE_MAX = 8;  // refreshes a bank may be owed before data is at risk
+  localparam int tRFCpb  = 8;                  // REFpb -> next ACT to that bank
+  localparam int tREFIpb = tREFI / NUM_BANKS;  // per-bank mode: one REFpb owed per tREFIpb, banks in turn
+  // RowHammer: refresh management (RFM). Each bank counts its ACTs (RAA); a
+  // refresh of the bank (REF or REFpb) takes RAA_IMT off the count. At RAA_IMT
+  // the controller may give an idle bank an extra REFpb; at RAA_MMT the bank
+  // takes no ACT until it has had one. Scaled like the rest: a real device fits
+  // about twice RAAIMT ACTs into a tREFI, and seven fit here (tRC 9).
+  localparam int RAA_IMT = 4;
+  localparam int RAA_MMT = 12;
 
   // ---------------------------------------------------------------------------
-  // DRAM commands (controller -> model)
+  // DRAM commands (controller -> model). The row bus carries ACT, PRE, PREA,
+  // REF and REFPB; the column bus carries RD and WR.
   // ---------------------------------------------------------------------------
   typedef enum logic [2:0] {
-    CMD_NOP  = 3'b000,
-    CMD_ACT  = 3'b001,
-    CMD_RD   = 3'b010,
-    CMD_WR   = 3'b011,
-    CMD_PRE  = 3'b100,
-    CMD_REF  = 3'b101,  // all banks; every bank must be precharged
-    CMD_PREA = 3'b110   // precharge all open banks
+    CMD_NOP   = 3'b000,
+    CMD_ACT   = 3'b001,
+    CMD_RD    = 3'b010,
+    CMD_WR    = 3'b011,
+    CMD_PRE   = 3'b100,
+    CMD_REF   = 3'b101,  // all banks; every bank must be precharged
+    CMD_PREA  = 3'b110,  // precharge all open banks
+    CMD_REFPB = 3'b111   // refresh one bank; that bank must be precharged
   } dram_cmd_e;
+
+  /* verilator lint_off UNUSEDSIGNAL */
+  function automatic logic [BG_BITS-1:0] bg_of(input logic [BANK_BITS-1:0] b);
+    return b[BANK_BITS-1 -: BG_BITS];  // the group is the bank number's MSB
+  endfunction
+  /* verilator lint_on UNUSEDSIGNAL */
+
+  // ---------------------------------------------------------------------------
+  // Refresh mode (mem_ctrl parameter REF_MODE)
+  // ---------------------------------------------------------------------------
+  localparam int REF_ALL  = 0;  // REF: PREA, then all banks for tRFC
+  localparam int REF_BANK = 1;  // REFpb: one bank at a time for tRFCpb; the others keep working
 
   // ---------------------------------------------------------------------------
   // Page policy (mem_ctrl parameter PAGE_POLICY)

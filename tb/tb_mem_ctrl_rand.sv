@@ -24,6 +24,9 @@ module tb_mem_ctrl_rand
   parameter int P_PAGE_POLICY  = PAGE_OPEN,
   parameter int P_PAGE_TIMEOUT = 16,
   parameter int P_ADDR_MAP     = MAP_XOR,
+  parameter int P_CMD_BUS      = 2,
+  parameter int P_REF_MODE     = REF_BANK,
+  parameter bit P_RFM_EARLY    = 1'b1,
   parameter int P_RD_PIPE      = 4,
   parameter int P_STARVE_LIMIT = 160,
   parameter int P_REF_URGENT   = 4
@@ -48,6 +51,9 @@ module tb_mem_ctrl_rand
     .PAGE_POLICY  (P_PAGE_POLICY),
     .PAGE_TIMEOUT (P_PAGE_TIMEOUT),
     .ADDR_MAP     (P_ADDR_MAP),
+    .CMD_BUS      (P_CMD_BUS),
+    .REF_MODE     (P_REF_MODE),
+    .RFM_EARLY    (P_RFM_EARLY),
     .RD_PIPE      (P_RD_PIPE),
     .STARVE_LIMIT (P_STARVE_LIMIT),
     .REF_URGENT   (P_REF_URGENT)
@@ -72,56 +78,78 @@ module tb_mem_ctrl_rand
 
   // A column command with no ACT on its bank since the previous column command
   // is a row hit. An ACT after a PRE makes it a conflict, an ACT on a closed
-  // bank a miss. Auto-precharge, PREA and REF close rows without a conflict,
-  // and so does a PRE to a bank no queued request needs (PAGE_TIMER).
+  // bank a miss. Auto-precharge, PREA, REF and REFpb close rows without a
+  // conflict, and so does a PRE to a bank no queued request needs.
+  // The column bus carries no row: the open row of each bank comes from the
+  // ACTs on the row bus. The column command of an edge is handled before its
+  // row command, as in the model and the checker.
   // A data beat is a cycle with read data or write data on the DRAM bus.
-  bit          act_seen [NUM_BANKS];
-  bit          pre_seen [NUM_BANKS];
+  bit                   act_seen [NUM_BANKS];
+  bit                   pre_seen [NUM_BANKS];
+  logic [ROW_BITS-1:0]  open_row [NUM_BANKS];
+  int                   raa      [NUM_BANKS];  // ACTs since the bank's refreshes, as RFM counts them
   int unsigned          access_errs;
   int unsigned          rds_in_flight;
-  logic [BANK_BITS-1:0] b;
+  logic [BANK_BITS-1:0] rb, cb;
 
   always @(posedge clk) begin
     if (hif.rst_n !== 1'b1) begin
       for (int i = 0; i < NUM_BANKS; i++) begin
         act_seen[i] = 1'b0;
         pre_seen[i] = 1'b0;
+        open_row[i] = '0;
+        raa[i]      = 0;
       end
       access_errs   = 0;
       rds_in_flight = 0;
     end else if (env != null) begin
-      b = dut.d_bank;
+      rb = dut.d_rbank;
+      cb = dut.d_cbank;
       if (access_err) access_errs++;
       if (dut.d_data_valid) begin
         env.note_beat();
         rds_in_flight--;
       end
       if (dut.d_wdata_en) env.note_beat();
-      case (dut.d_cmd)
-        CMD_PRE: begin
-          if (env.bank_wanted(int'(b))) pre_seen[b] = 1'b1;
-          else                          env.note_pre_idle();
+      if (dut.d_ccmd == CMD_RD || dut.d_ccmd == CMD_WR) begin
+        env.note_col(dut.d_ccmd == CMD_WR,
+                     !act_seen[cb] ? COL_HIT : (pre_seen[cb] ? COL_CONFLICT : COL_MISS));
+        env.note_col_cmd(dut.d_ccmd == CMD_WR, {cb, open_row[cb], dut.d_col}, dut.d_ap,
+                         int'(bg_of(cb)), hif.cyc);
+        if (dut.d_ccmd == CMD_RD) begin
+          rds_in_flight++;
+          env.note_rd_depth(rds_in_flight);
         end
-        CMD_ACT: act_seen[b] = 1'b1;
-        CMD_RD, CMD_WR: begin
-          env.note_col(dut.d_cmd == CMD_WR,
-                       !act_seen[b] ? COL_HIT : (pre_seen[b] ? COL_CONFLICT : COL_MISS));
-          env.note_col_cmd(dut.d_cmd == CMD_WR, {dut.d_bank, dut.d_row, dut.d_col}, dut.d_ap,
-                           hif.cyc);
-          if (dut.d_cmd == CMD_RD) begin
-            rds_in_flight++;
-            env.note_rd_depth(rds_in_flight);
-          end
-          act_seen[b] = 1'b0;
-          pre_seen[b] = 1'b0;
+        act_seen[cb] = 1'b0;
+        pre_seen[cb] = 1'b0;
+      end
+      if (dut.d_ccmd != CMD_NOP && dut.d_rcmd != CMD_NOP) env.note_dual();
+      case (dut.d_rcmd)
+        CMD_PRE: begin
+          if (env.bank_wanted(int'(rb))) pre_seen[rb] = 1'b1;
+          else                           env.note_pre_idle();
+        end
+        CMD_ACT: begin
+          act_seen[rb] = 1'b1;
+          open_row[rb] = dut.d_row;
+          raa[rb]++;
+          if (raa[rb] == RAA_MMT) env.note_raa_mmt();
         end
         CMD_PREA: begin
           for (int i = 0; i < NUM_BANKS; i++) pre_seen[i] = 1'b0;
           env.note_prea();
         end
         CMD_REF: begin
-          for (int i = 0; i < NUM_BANKS; i++) pre_seen[i] = 1'b0;
+          for (int i = 0; i < NUM_BANKS; i++) begin
+            pre_seen[i] = 1'b0;
+            raa[i]      = (raa[i] > RAA_IMT) ? raa[i] - RAA_IMT : 0;
+          end
           env.note_ref();
+        end
+        CMD_REFPB: begin
+          pre_seen[rb] = 1'b0;
+          env.note_refpb(dut.d_ccmd != CMD_NOP, raa[rb] >= RAA_IMT);
+          raa[rb] = (raa[rb] > RAA_IMT) ? raa[rb] - RAA_IMT : 0;
         end
         default: ;
       endcase

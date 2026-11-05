@@ -1,5 +1,7 @@
-// Command scheduler: picks at most one DRAM command per cycle from the read
-// queue (index 0) and the write queue (index 1).
+// Command scheduler for the read queue (index 0) and the write queue (index 1).
+// CMD_BUS = 2: one row command (ACT, PRE, PREA, REF, REFPB) and one column
+// command (RD, WR) per cycle, on separate buses as in HBM. CMD_BUS = 1: one
+// command per cycle (v3).
 //
 // Each queued request needs one next command:
 //   RD/WR when its row is open (hit), ACT when its bank is closed (miss),
@@ -10,14 +12,16 @@
 // write batch, see mc_wdrain); with WDRAIN = 0 both queues, oldest first
 // across them as in v2 (w_older_r orders a read against a write).
 //
-// Pick, in order:
-//   1. the oldest ready RD/WR of the eligible queue
-//   2. its oldest ready ACT/PRE
-//   3. the other queue's oldest ready RD/WR             (WDRAIN = 1)
-//   4. the other queue's ACT, or PRE of a row nobody hits, on a bank the
-//      eligible queue does not need                     (WDRAIN = 1)
-//   5. a timer PRE                                      (PAGE_TIMER)
-// FR_FCFS = 0 orders 1 and 2 by age instead of putting 1 first.
+// Picks:
+//   column bus  the oldest ready RD/WR of the eligible queue, else of the
+//               other queue (WDRAIN = 1)
+//   row bus     a ready refresh command, then an RFM command (both below),
+//               then the eligible queue's oldest ready ACT/PRE, then the other
+//               queue's ACT, or PRE of a row nobody hits, on a bank the
+//               eligible queue does not need (WDRAIN = 1), then a timer PRE
+//               (PAGE_TIMER)
+//   one bus     refresh, RFM, then the column pick before the row pick
+//   (CMD_BUS=1) (FR_FCFS = 1) or the older of the two (FR_FCFS = 0)
 //
 // Row protection: a bank is not precharged while a queued request of either
 // queue hits its row (FR_FCFS = 1), or an older one does (FR_FCFS = 0).
@@ -41,8 +45,23 @@
 // one-hot all the way out (serve, and AND-OR selects for the command fields),
 // so no index is encoded here and decoded again downstream.
 //
-// Refresh (ref_hold): no ACT and no RD/WR. PREA once every open bank may
-// precharge, then REF once every bank has met tRP and tRC.
+// Bank groups: column and ACT readiness come per group from mc_chan
+// (tCCD_S/L, tRRD_S/L, tWTR_S/L).
+//
+// Two buses: both picks issue on one edge, except that a PRE never goes to a
+// bank that has a column command ready (FCFS could otherwise pair a PRE for
+// an old conflict with a younger hit's RD on the same bank).
+//
+// Refresh (ref_hold), REF_ALL: no ACT and no RD/WR on any bank; PREA once
+// every open bank may precharge, then REF once every bank has met tRP and tRC.
+// REF_BANK: the same for bank ref_bank only, with PRE and REFpb; the other
+// banks keep working. A ready refresh command goes first on the row bus.
+//
+// Refresh management (RFM): a bank at RAA_MMT takes no ACT; it gets a REFpb
+// as soon as it is closed (PRE first once no queued request hits its row).
+// With RFM_EARLY, a bank at RAA_IMT that no queued request needs also gets a
+// REFpb when it is closed. These come after the periodic refresh on the row
+// bus.
 `timescale 1ns/1ps
 
 module mc_sched
@@ -52,6 +71,9 @@ module mc_sched
   parameter bit FR_FCFS      = 1'b1,
   parameter bit WDRAIN       = 1'b1,
   parameter int PAGE_POLICY  = PAGE_OPEN,
+  parameter int CMD_BUS      = 2,
+  parameter int REF_MODE     = REF_BANK,
+  parameter bit RFM_EARLY    = 1'b1,
   parameter int STARVE_LIMIT = 160
 ) (
   input  logic [1:0][DEPTH-1:0]                 q_valid,
@@ -69,18 +91,26 @@ module mc_sched
   input  logic [NUM_BANKS-1:0]                  bank_col_ok,
   input  logic [NUM_BANKS-1:0]                  bank_pre_ok,
   input  logic [NUM_BANKS-1:0]                  bank_idle,
-  input  logic                                  chan_act_ok,
-  input  logic                                  chan_rd_ok,
-  input  logic                                  chan_wr_ok,
+  input  logic [NUM_BANKS-1:0]                  bank_raa_imt,
+  input  logic [NUM_BANKS-1:0]                  bank_raa_mmt,
+  input  logic [NUM_BG-1:0]                     chan_act_ok,
+  input  logic [NUM_BG-1:0]                     chan_rd_ok,
+  input  logic [NUM_BG-1:0]                     chan_wr_ok,
+  input  logic                                  chan_refpb_ok,
   input  logic                                  chan_any_ok,
   input  logic                                  rd_slot_ok,
   input  logic                                  ref_hold,
-  output dram_cmd_e                             cmd,
-  output logic [BANK_BITS-1:0]                  cmd_bank,
-  output logic [ROW_BITS-1:0]                   cmd_row,
-  output logic [COL_BITS-1:0]                   cmd_col,
-  output logic                                  cmd_ap,     // RD/WR with auto-precharge
-  output logic [1:0][DEPTH-1:0]                 serve,      // one-hot: cmd is this entry's RD/WR
+  input  logic [BANK_BITS-1:0]                  ref_bank,   // REF_BANK: the bank to refresh
+  output dram_cmd_e                             rcmd,       // row bus
+  output logic [BANK_BITS-1:0]                  rbank,
+  output logic [ROW_BITS-1:0]                   rrow,
+  output dram_cmd_e                             ccmd,       // column bus
+  output logic [BANK_BITS-1:0]                  cbank,
+  output logic [COL_BITS-1:0]                   ccol,
+  output logic                                  cap,        // RD/WR with auto-precharge
+  output logic [1:0][DEPTH-1:0]                 serve,      // one-hot: ccmd is this entry's RD/WR
+  output logic [NUM_BANKS-1:0]                  wanted,     // banks a queued request needs
+  output logic                                  ref_issued, // rcmd is the periodic REF/REFpb
   output logic                                  w_starve
 );
 
@@ -89,10 +119,16 @@ module mc_sched
   set_t                 live, hit, conf, miss, hazard, waited, guarded, other_hit;
   set_t                 col_rdy, row_rdy, prep_rdy, xcol_rdy, ccand, rcand, old_sel, col_sel, row_sel;
   logic [1:0]           elig;
-  logic [NUM_BANKS-1:0] hit_bank, wanted, live_wanted, starve_bank, tpre_rdy;
+  logic [NUM_BANKS-1:0] hit_bank, live_wanted, starve_bank, tpre_rdy, blocked, col_bank_rdy;
   logic                 starving, col_first, use_col, col_wr, row_act, keep_row;
+  logic                 ref_go;    // a refresh command is ready this cycle
+  dram_cmd_e            ref_cmd;
+  logic [BANK_BITS-1:0] ref_cbank;
+  logic                 rfm_go;    // an RFM command (PRE or REFpb) is ready
+  dram_cmd_e            rfm_cmd;
+  logic [BANK_BITS-1:0] rfm_bank;
   logic [BANK_BITS-1:0] col_bank, row_bank;
-  logic [ROW_BITS-1:0]  col_row, row_row;
+  logic [ROW_BITS-1:0]  row_row;
   logic [COL_BITS-1:0]  col_col;
   logic [BANK_BITS-1:0] tpre_bank;
 
@@ -136,11 +172,19 @@ module mc_sched
   endfunction
 
 
+  // Banks a queued request needs (also read by mc_refresh, so kept apart from
+  // the logic below, which depends on ref_hold)
+  always_comb begin
+    wanted = '0;
+    for (int q = 0; q < 2; q++)
+      for (int i = 0; i < DEPTH; i++)
+        if (q_valid[q][i]) wanted[q_bank[q][i]] = 1'b1;
+  end
+
   always_comb begin
     elig[0] = !WDRAIN || !wmode;
     elig[1] = !WDRAIN ||  wmode;
     hit_bank      = '0;
-    wanted        = '0;
     live_wanted   = '0;
     for (int q = 0; q < 2; q++) begin
       for (int i = 0; i < DEPTH; i++) begin
@@ -151,7 +195,6 @@ module mc_sched
         waited[q][i] = q_wait[q][i] >= 8'(STARVE_LIMIT);
         live[q][i]   = q_valid[q][i] && elig[q];
         if (hit[q][i])             hit_bank[q_bank[q][i]]      = 1'b1;
-        if (q_valid[q][i])         wanted[q_bank[q][i]]        = 1'b1;
         if (live[q][i])            live_wanted[q_bank[q][i]]   = 1'b1;
       end
     end
@@ -182,24 +225,42 @@ module mc_sched
       for (int i = 0; i < DEPTH; i++)
         if (starving && old_sel[q][i] && conf[q][i]) starve_bank[q_bank[q][i]] = 1'b1;
 
+    // Banks closed to traffic by refresh: all of them (REF_ALL) or one (REF_BANK)
+    for (int b = 0; b < NUM_BANKS; b++)
+      blocked[b] = ref_hold && (REF_MODE == REF_ALL || ref_bank == BANK_BITS'(b));
+
+    // Column commands first: a PRE on the row bus must not meet one on its bank
+    col_bank_rdy = '0;
     for (int q = 0; q < 2; q++) begin
       for (int i = 0; i < DEPTH; i++) begin
-        col_rdy[q][i] = live[q][i] && hit[q][i] && !hazard[q][i] && !ref_hold &&
-                        bank_col_ok[q_bank[q][i]] && !starve_bank[q_bank[q][i]] &&
-                        ((q == 1) ? chan_wr_ok : (chan_rd_ok && rd_slot_ok));
-        row_rdy[q][i] = live[q][i] && !ref_hold && (
-                          (miss[q][i] && bank_act_ok[q_bank[q][i]] && chan_act_ok) ||
-                          (conf[q][i] && bank_pre_ok[q_bank[q][i]] && chan_any_ok &&
-                           (!guarded[q][i] || starve_bank[q_bank[q][i]])));
+        col_rdy[q][i]  = live[q][i] && hit[q][i] && !hazard[q][i] && !blocked[q_bank[q][i]] &&
+                         bank_col_ok[q_bank[q][i]] && !starve_bank[q_bank[q][i]] &&
+                         ((q == 1) ? chan_wr_ok[bg_of(q_bank[q][i])]
+                                   : (chan_rd_ok[bg_of(q_bank[q][i])] && rd_slot_ok));
         // The waiting queue may use a slot the eligible one leaves empty
         xcol_rdy[q][i] = WDRAIN && q_valid[q][i] && !elig[q] && hit[q][i] && !hazard[q][i] &&
-                         !ref_hold && bank_col_ok[q_bank[q][i]] && !starve_bank[q_bank[q][i]] &&
-                         ((q == 1) ? chan_wr_ok : (chan_rd_ok && rd_slot_ok));
-        prep_rdy[q][i] = WDRAIN && q_valid[q][i] && !elig[q] && !ref_hold &&
-                         !live_wanted[q_bank[q][i]] && (
-                           (miss[q][i] && bank_act_ok[q_bank[q][i]] && chan_act_ok) ||
+                         !blocked[q_bank[q][i]] && bank_col_ok[q_bank[q][i]] &&
+                         !starve_bank[q_bank[q][i]] &&
+                         ((q == 1) ? chan_wr_ok[bg_of(q_bank[q][i])]
+                                   : (chan_rd_ok[bg_of(q_bank[q][i])] && rd_slot_ok));
+        if (CMD_BUS == 2 && (col_rdy[q][i] || xcol_rdy[q][i])) col_bank_rdy[q_bank[q][i]] = 1'b1;
+      end
+    end
+
+    for (int q = 0; q < 2; q++) begin
+      for (int i = 0; i < DEPTH; i++) begin
+        row_rdy[q][i]  = live[q][i] && !blocked[q_bank[q][i]] && (
+                           (miss[q][i] && bank_act_ok[q_bank[q][i]] && !bank_raa_mmt[q_bank[q][i]] &&
+                            chan_act_ok[bg_of(q_bank[q][i])]) ||
                            (conf[q][i] && bank_pre_ok[q_bank[q][i]] && chan_any_ok &&
-                            !hit_bank[q_bank[q][i]]));
+                            !col_bank_rdy[q_bank[q][i]] &&
+                            (!guarded[q][i] || starve_bank[q_bank[q][i]])));
+        prep_rdy[q][i] = WDRAIN && q_valid[q][i] && !elig[q] && !blocked[q_bank[q][i]] &&
+                         !live_wanted[q_bank[q][i]] && (
+                           (miss[q][i] && bank_act_ok[q_bank[q][i]] && !bank_raa_mmt[q_bank[q][i]] &&
+                            chan_act_ok[bg_of(q_bank[q][i])]) ||
+                           (conf[q][i] && bank_pre_ok[q_bank[q][i]] && chan_any_ok &&
+                            !col_bank_rdy[q_bank[q][i]] && !hit_bank[q_bank[q][i]]));
       end
     end
 
@@ -226,14 +287,12 @@ module mc_sched
     col_wr   = |col_sel[1];
     row_act  = |(row_sel & miss);
     col_bank = '0;
-    col_row  = '0;
     col_col  = '0;
     row_bank = '0;
     row_row  = '0;
     for (int q = 0; q < 2; q++) begin
       for (int i = 0; i < DEPTH; i++) begin
         col_bank = col_bank | ({BANK_BITS{col_sel[q][i]}} & q_bank[q][i]);
-        col_row  = col_row  | ({ROW_BITS{col_sel[q][i]}}  & q_row[q][i]);
         col_col  = col_col  | ({COL_BITS{col_sel[q][i]}}  & q_col[q][i]);
         row_bank = row_bank | ({BANK_BITS{row_sel[q][i]}} & q_bank[q][i]);
         row_row  = row_row  | ({ROW_BITS{row_sel[q][i]}}  & q_row[q][i]);
@@ -245,39 +304,95 @@ module mc_sched
     if (PAGE_POLICY == PAGE_TIMER) begin
       for (int b = NUM_BANKS - 1; b >= 0; b--) begin
         tpre_rdy[b] = bank_open[b] && bank_idle[b] && !wanted[b] && bank_pre_ok[b] &&
-                      chan_any_ok && !ref_hold;
+                      chan_any_ok && !blocked[b];
         if (tpre_rdy[b]) tpre_bank = BANK_BITS'(b);
+      end
+    end
+
+    // Refresh: PREA then REF for all banks, or PRE then REFpb for ref_bank
+    ref_go    = 1'b0;
+    ref_cmd   = CMD_NOP;
+    ref_cbank = '0;
+    if (ref_hold) begin
+      if (REF_MODE == REF_ALL) begin
+        if (|bank_open) begin
+          ref_go  = chan_any_ok && ((bank_pre_ok | ~bank_open) == '1);
+          ref_cmd = CMD_PREA;
+        end else begin
+          ref_go  = chan_any_ok && (bank_act_ok == '1);
+          ref_cmd = CMD_REF;
+        end
+      end else begin
+        ref_cbank = ref_bank;
+        if (bank_open[ref_bank]) begin
+          ref_go  = chan_any_ok && bank_pre_ok[ref_bank];
+          ref_cmd = CMD_PRE;
+        end else begin
+          ref_go  = chan_refpb_ok && bank_act_ok[ref_bank];
+          ref_cmd = CMD_REFPB;
+        end
+      end
+    end
+
+    // RFM: a bank at RAA_MMT first (PRE once nothing hits its row), then an
+    // idle closed bank at RAA_IMT. The lowest such bank number goes first.
+    rfm_go   = 1'b0;
+    rfm_cmd  = CMD_NOP;
+    rfm_bank = '0;
+    for (int b = NUM_BANKS - 1; b >= 0; b--) begin
+      if (!blocked[b] && bank_raa_imt[b] && (bank_raa_mmt[b] || (RFM_EARLY && !wanted[b])) &&
+          !bank_open[b] &&
+          bank_act_ok[b] && chan_refpb_ok) begin
+        rfm_go   = 1'b1;
+        rfm_cmd  = CMD_REFPB;
+        rfm_bank = BANK_BITS'(b);
+      end
+    end
+    for (int b = NUM_BANKS - 1; b >= 0; b--) begin
+      if (!blocked[b] && bank_raa_mmt[b] && bank_open[b] && !hit_bank[b] && bank_pre_ok[b] &&
+          chan_any_ok && !col_bank_rdy[b]) begin
+        rfm_go   = 1'b1;
+        rfm_cmd  = CMD_PRE;
+        rfm_bank = BANK_BITS'(b);
       end
     end
   end
 
+  // Output stage. Two buses: the column pick and the row pick (refresh first)
+  // go out together. One bus: refresh, then the column or row pick (use_col).
   always_comb begin
-    cmd       = CMD_NOP;
-    cmd_bank  = '0;
-    cmd_row   = '0;
-    cmd_col   = '0;
-    cmd_ap    = 1'b0;
-    serve     = '0;
-    if (ref_hold) begin
-      if (|bank_open) begin
-        if (chan_any_ok && ((bank_pre_ok | ~bank_open) == '1)) cmd = CMD_PREA;
-      end else if (chan_any_ok && (bank_act_ok == '1)) begin
-        cmd = CMD_REF;
+    rcmd       = CMD_NOP;
+    rbank      = '0;
+    rrow       = '0;
+    ccmd       = CMD_NOP;
+    cbank      = '0;
+    ccol       = '0;
+    cap        = 1'b0;
+    serve      = '0;
+    ref_issued = 1'b0;
+    if (CMD_BUS == 2 ? |ccand : (!ref_go && !rfm_go && use_col)) begin
+      ccmd  = col_wr ? CMD_WR : CMD_RD;
+      cbank = col_bank;
+      ccol  = col_col;
+      cap   = (PAGE_POLICY == PAGE_CLOSE) && !keep_row;
+      serve = col_sel;
+    end
+    if (ref_go) begin
+      rcmd       = ref_cmd;
+      rbank      = ref_cbank;
+      ref_issued = (ref_cmd == CMD_REF || ref_cmd == CMD_REFPB);
+    end else if (rfm_go) begin
+      rcmd  = rfm_cmd;
+      rbank = rfm_bank;
+    end else if (CMD_BUS == 2 || !use_col) begin
+      if (|rcand) begin
+        rcmd  = row_act ? CMD_ACT : CMD_PRE;
+        rbank = row_bank;
+        rrow  = row_row;
+      end else if (|tpre_rdy) begin
+        rcmd  = CMD_PRE;
+        rbank = tpre_bank;
       end
-    end else if (use_col) begin
-      cmd      = col_wr ? CMD_WR : CMD_RD;
-      cmd_bank = col_bank;
-      cmd_row  = col_row;
-      cmd_col  = col_col;
-      cmd_ap   = (PAGE_POLICY == PAGE_CLOSE) && !keep_row;
-      serve    = col_sel;
-    end else if (|rcand) begin
-      cmd      = row_act ? CMD_ACT : CMD_PRE;
-      cmd_bank = row_bank;
-      cmd_row  = row_row;
-    end else if (|tpre_rdy) begin
-      cmd      = CMD_PRE;
-      cmd_bank = tpre_bank;
     end
   end
 

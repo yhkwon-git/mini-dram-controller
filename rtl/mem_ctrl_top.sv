@@ -13,6 +13,9 @@ module mem_ctrl_top
   parameter int PAGE_POLICY  = PAGE_OPEN,
   parameter int PAGE_TIMEOUT = 16,
   parameter int ADDR_MAP     = MAP_XOR,
+  parameter int CMD_BUS      = 2,
+  parameter int REF_MODE     = REF_BANK,
+  parameter bit RFM_EARLY    = 1'b1,
   parameter int RD_PIPE      = 4,
   parameter int STARVE_LIMIT = 160,
   parameter int REF_URGENT   = 4
@@ -43,8 +46,8 @@ module mem_ctrl_top
   logic                 c_rsp_valid, c_rsp_ready, c_rsp_err;
   logic [DATA_BITS-1:0] c_rsp_rdata;
 
-  dram_cmd_e            d_cmd;
-  logic [BANK_BITS-1:0] d_bank;
+  dram_cmd_e            d_rcmd, d_ccmd;
+  logic [BANK_BITS-1:0] d_rbank, d_cbank;
   logic [ROW_BITS-1:0]  d_row;
   logic [COL_BITS-1:0]  d_col;
   logic                 d_ap;
@@ -89,6 +92,9 @@ module mem_ctrl_top
     .PAGE_POLICY  (PAGE_POLICY),
     .PAGE_TIMEOUT (PAGE_TIMEOUT),
     .ADDR_MAP     (ADDR_MAP),
+    .CMD_BUS      (CMD_BUS),
+    .REF_MODE     (REF_MODE),
+    .RFM_EARLY    (RFM_EARLY),
     .RD_PIPE      (RD_PIPE),
     .STARVE_LIMIT (STARVE_LIMIT),
     .REF_URGENT   (REF_URGENT)
@@ -104,9 +110,11 @@ module mem_ctrl_top
     .rsp_ready       (c_rsp_ready),
     .rsp_rdata       (c_rsp_rdata),
     .rsp_err         (c_rsp_err),
-    .dram_cmd        (d_cmd),
-    .dram_bank       (d_bank),
+    .dram_rcmd       (d_rcmd),
+    .dram_rbank      (d_rbank),
     .dram_row        (d_row),
+    .dram_ccmd       (d_ccmd),
+    .dram_cbank      (d_cbank),
     .dram_col        (d_col),
     .dram_ap         (d_ap),
     .dram_wdata_en   (d_wdata_en),
@@ -118,9 +126,11 @@ module mem_ctrl_top
   dram_model u_dram (
     .clk          (clk),
     .rst_n        (rst_n),
-    .cmd          (d_cmd),
-    .bank         (d_bank),
+    .rcmd         (d_rcmd),
+    .rbank        (d_rbank),
     .row          (d_row),
+    .ccmd         (d_ccmd),
+    .cbank        (d_cbank),
     .col          (d_col),
     .ap           (d_ap),
     .wdata_en     (d_wdata_en),

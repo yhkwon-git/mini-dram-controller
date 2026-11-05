@@ -46,7 +46,13 @@ package mc_tb_pkg;
     CV_REF_LOADED,      // REF with 4+ requests in flight (urgent refresh under load)
     CV_WR_BATCH_4,      // 4+ WRs in a row on the DRAM pins, no RD between
     CV_AP,              // RD/WR with auto-precharge (PAGE_CLOSE)
-    CV_PRE_IDLE,        // PRE to a bank no queued request needs (PAGE_TIMER)
+    CV_PRE_IDLE,        // PRE to a bank no queued request needs (timer, per-bank refresh)
+    CV_DUAL,            // a row command and a column command on one edge
+    CV_REFPB,           // per-bank refresh
+    CV_REFPB_TRAFFIC,   // REFpb on an edge where a RD/WR goes to another bank
+    CV_BG_INTERLEAVE,   // RD/WR on consecutive edges in different bank groups
+    CV_RFM,             // REFpb to a bank at or over RAA_IMT (refresh management)
+    CV_RAA_MMT,         // a bank reached RAA_MMT: no ACT to it until a refresh
     CV_N
   } cov_bin_e;
 
@@ -432,6 +438,12 @@ package mc_tb_pkg;
       label[CV_WR_BATCH_4]     = "4+ WRs in a row on the DRAM bus";
       label[CV_AP]             = "RD/WR with auto-precharge";
       label[CV_PRE_IDLE]       = "PRE to a bank nobody waits for";
+      label[CV_DUAL]           = "row + column command on one edge";
+      label[CV_REFPB]          = "per-bank refresh (REFpb)";
+      label[CV_REFPB_TRAFFIC]  = "REFpb with a RD/WR on that edge";
+      label[CV_BG_INTERLEAVE]  = "RD/WR back to back, other group";
+      label[CV_RFM]            = "REFpb at RAA >= RAA_IMT (RFM)";
+      label[CV_RAA_MMT]        = "a bank reached RAA_MMT";
       short_name[CV_RD_HIT]         = "rd_hit";
       short_name[CV_RD_MISS]        = "rd_miss";
       short_name[CV_RD_CONFLICT]    = "rd_conflict";
@@ -458,6 +470,12 @@ package mc_tb_pkg;
       short_name[CV_WR_BATCH_4]     = "wr_batch_4";
       short_name[CV_AP]             = "ap";
       short_name[CV_PRE_IDLE]       = "pre_idle";
+      short_name[CV_DUAL]           = "dual_issue";
+      short_name[CV_REFPB]          = "refpb";
+      short_name[CV_REFPB_TRAFFIC]  = "refpb_traffic";
+      short_name[CV_BG_INTERLEAVE]  = "bg_interleave";
+      short_name[CV_RFM]            = "rfm";
+      short_name[CV_RAA_MMT]        = "raa_mmt";
       foreach (hits[i]) hits[i] = 0;
     endfunction
 
@@ -607,6 +625,8 @@ package mc_tb_pkg;
     longint      turns;            // RD <-> WR switches between column commands
     int          last_dir;         // -1 none yet, 0 RD, 1 WR
     int unsigned wr_run;           // WRs in a row
+    longint      last_col_edge;    // edge and bank group of the last RD/WR
+    int          last_col_bg;
     bit          hung, lost_writes;
     int unsigned stall_run;
 
@@ -622,6 +642,8 @@ package mc_tb_pkg;
       turns       = 0;
       last_dir    = -1;
       wr_run      = 0;
+      last_col_edge = -2;
+      last_col_bg   = -1;
       hung        = 1'b0;
       lost_writes = 1'b0;
       stall_run   = 0;
@@ -713,7 +735,10 @@ package mc_tb_pkg;
     // older request still waits is a reorder (legal); no match is an error.
     // edge: the clock edge index of the command (the top passes hif.cyc, which it
     // reads before that edge's update; a class read of vif.cyc may see it after)
-    function void note_col_cmd(bit write, loc_t l, bit ap, longint edge_idx);
+    function void note_col_cmd(bit write, loc_t l, bit ap, int bg, longint edge_idx);
+      if (edge_idx == last_col_edge + 1 && bg != last_col_bg) cov.hit(CV_BG_INTERLEAVE);
+      last_col_edge = edge_idx;
+      last_col_bg   = bg;
       if (last_dir >= 0 && last_dir != int'(write)) turns++;
       last_dir = int'(write);
       wr_run   = write ? wr_run + 1 : 0;
@@ -741,6 +766,26 @@ package mc_tb_pkg;
 
     function void note_pre_idle();
       cov.hit(CV_PRE_IDLE);
+    endfunction
+
+    function void note_raa_mmt();
+      cov.hit(CV_RAA_MMT);
+    endfunction
+
+    function void note_dual();
+      cov.hit(CV_DUAL);
+    endfunction
+
+    // traffic: a RD/WR to another bank on the same edge; rfm: the bank was at
+    // or over RAA_IMT (the testbench top counts ACTs per bank)
+    function void note_refpb(bit traffic, bit rfm);
+      cov.hit(CV_REFPB);
+      if (rfm) cov.hit(CV_RFM);
+      if (traffic) cov.hit(CV_REFPB_TRAFFIC);
+      if (sb.pending.size() != 0) cov.hit(CV_REF_OWED);
+      if (sb.pending.size() == 0) cov.hit(CV_REF_IDLE);
+      if (sb.pending.size() >= 4) cov.hit(CV_REF_LOADED);
+      if (vif.rsp_valid === 1'b1 && vif.rsp_ready !== 1'b1) cov.hit(CV_REF_STALLED);
     endfunction
 
     function void note_beat();

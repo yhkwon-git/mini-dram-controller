@@ -31,7 +31,9 @@ COV_SEEDS   ?= 1 2 3
 VARIANTS      ?= fcfs:-GP_FR_FCFS=0 starve24:-GP_STARVE_LIMIT=24 rdpipe1:-GP_RD_PIPE=1 depth4:-GP_DEPTH=4 \
                  nodrain:-GP_WDRAIN=0 fcfs_nodrain:-GP_FR_FCFS=0,-GP_WDRAIN=0 \
                  close:-GP_PAGE_POLICY=1 timer:-GP_PAGE_POLICY=2 \
-                 map_brc:-GP_ADDR_MAP=0 map_rbc:-GP_ADDR_MAP=1 map_rcb:-GP_ADDR_MAP=2
+                 map_brc:-GP_ADDR_MAP=0 map_rbc:-GP_ADDR_MAP=1 map_rcb:-GP_ADDR_MAP=2 \
+                 bus1:-GP_CMD_BUS=1 refab:-GP_REF_MODE=0 bus1_refab:-GP_CMD_BUS=1,-GP_REF_MODE=0 \
+                 rfm_late:-GP_RFM_EARLY=0
 VARIANT_SEEDS ?= 10
 
 # Builds and runs go JOBS at a time (make regress JOBS=1 for one at a time)

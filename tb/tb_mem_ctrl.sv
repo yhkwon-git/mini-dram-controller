@@ -27,7 +27,7 @@ module tb_mem_ctrl
   int unsigned errs;
   int unsigned access_err_count;
   int unsigned rsp_err_count;      // rsp_err pulses on accepted responses (v1: must stay 0)
-  int unsigned ref_count;          // CMD_REF issued to the model
+  int unsigned ref_count;          // REF or REFpb issued to the model
   int unsigned rd_count;           // CMD_RD issued to the model
   int unsigned max_banks_opening;  // scenario 4: banks with an ACT whose RD/WR has not issued
 
@@ -72,10 +72,10 @@ module tb_mem_ctrl
     end else begin
       if (dram_access_err)                    access_err_count <= access_err_count + 1;
       if (rsp_valid && rsp_ready && rsp_err)  rsp_err_count    <= rsp_err_count + 1;
-      if (dut.d_cmd == CMD_REF)               ref_count        <= ref_count + 1;
-      if (dut.d_cmd == CMD_RD)                rd_count         <= rd_count + 1;
-      if (dut.d_cmd == CMD_ACT)               opening[dut.d_bank] <= 1'b1;
-      if (dut.d_cmd == CMD_RD || dut.d_cmd == CMD_WR) opening[dut.d_bank] <= 1'b0;
+      if (dut.d_rcmd == CMD_REF || dut.d_rcmd == CMD_REFPB) ref_count <= ref_count + 1;
+      if (dut.d_ccmd == CMD_RD)                              rd_count  <= rd_count + 1;
+      if (dut.d_rcmd == CMD_ACT)                         opening[dut.d_rbank] <= 1'b1;
+      if (dut.d_ccmd == CMD_RD || dut.d_ccmd == CMD_WR)  opening[dut.d_cbank] <= 1'b0;
     end
   end
 
@@ -322,12 +322,14 @@ module tb_mem_ctrl
     $display("[TB] === SCENARIO 6: read forwarded from the write queue ===");
     // Two writes to one address, then a read before they reach the DRAM: the
     // read must return the younger write's data without a RD on the DRAM pins.
-    // Starting right after a REF keeps the writes queued: no WR within tRFC.
+    // Starting right after a refresh of that bank keeps the writes queued: no
+    // ACT within tRFC (REF) or tRFCpb (REFpb to bank 2).
     drain_queues();
     begin : fwd
       int unsigned rd0, got;
       @(posedge clk);
-      while (dut.d_cmd !== CMD_REF) @(posedge clk);
+      while (!(dut.d_rcmd === CMD_REF || (dut.d_rcmd === CMD_REFPB && dut.d_rbank === 2'd2)))
+        @(posedge clk);
       rd0 = rd_count;
       got = 0;
       fork

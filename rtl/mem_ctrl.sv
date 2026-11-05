@@ -1,17 +1,22 @@
-// Mini memory controller v3: read and write queues + command-level scheduler.
+// Mini memory controller v4: read and write queues, command-level scheduler,
+// separate row and column command buses, bank groups, per-bank refresh.
 //
 //   mc_queue x2  accepted reads and writes until their RD/WR is issued
 //   mc_xage      age between the two queues
 //   mc_wdrain    read mode / write batch (watermarks)
 //   mc_bank x4   open row and same-bank timing (tRCD tRP tRAS tRC tRTP tWR),
 //                auto-precharge, idle time
-//   mc_chan      channel timing (tCCD tRRD tFAW tWTR tRTW tRFC)
-//   mc_refresh   one REF owed per tREFI, paid back when idle or when urgent
-//   mc_sched     one DRAM command per cycle (FR-FCFS or FCFS, page policy)
+//   mc_chan      channel timing per bank group (tCCD_S/L tRRD_S/L tWTR_S/L
+//                tFAW tRTW tRFC)
+//   mc_refresh   refresh owed per tREFI (all-bank) or per tREFI/4 (per-bank)
+//   mc_sched     a row command and a column command per cycle (FR-FCFS or
+//                FCFS, page policy, refresh)
 //   mc_resp      tags, read-return FIFO, write-data pipeline, in-order responses
 //
-// The DRAM side is DFI-like: commands with fixed data latencies (RL, WL) and
-// no busy signal; the controller tracks every timing rule itself.
+// The DRAM side is DFI-like: a row command bus (ACT, PRE, PREA, REF, REFPB)
+// and a column command bus (RD, WR with auto-precharge) with fixed data
+// latencies (RL, WL) and no busy signal; the controller tracks every timing
+// rule itself. The column bus carries no row: the device uses the open one.
 //
 // Writes are posted: answered when accepted. A read whose address is in the
 // write queue is answered from the youngest such write (forwarding) and never
@@ -30,6 +35,9 @@ module mem_ctrl
   parameter int PAGE_POLICY  = PAGE_OPEN,    // PAGE_OPEN, PAGE_CLOSE, PAGE_TIMER
   parameter int PAGE_TIMEOUT = 16,           // PAGE_TIMER: idle cycles before a PRE
   parameter int ADDR_MAP     = MAP_XOR,      // MAP_XOR, MAP_RBC, MAP_RCB, MAP_BRC (v2)
+  parameter int CMD_BUS      = 2,            // 2 = row + column bus, 1 = one command per cycle (v3)
+  parameter int REF_MODE     = REF_BANK,     // REF_BANK = per-bank REFpb, REF_ALL = PREA + REF (v3)
+  parameter bit RFM_EARLY    = 1'b1,         // RFM at RAA_IMT for idle banks; 0 = only at RAA_MMT
   parameter int RD_PIPE      = 4,            // RDs in flight on the DRAM bus (v1: 1)
   parameter int STARVE_LIMIT = 160,          // cycles before the oldest request overrides row hits
   parameter int REF_URGENT   = 4             // owed REFs that stop new traffic
@@ -48,9 +56,11 @@ module mem_ctrl
   output logic [DATA_BITS-1:0] rsp_rdata,
   output logic                 rsp_err,
 
-  output dram_cmd_e            dram_cmd,
-  output logic [BANK_BITS-1:0] dram_bank,
+  output dram_cmd_e            dram_rcmd,   // row bus: ACT, PRE, PREA, REF, REFPB
+  output logic [BANK_BITS-1:0] dram_rbank,
   output logic [ROW_BITS-1:0]  dram_row,
+  output dram_cmd_e            dram_ccmd,   // column bus: RD, WR
+  output logic [BANK_BITS-1:0] dram_cbank,
   output logic [COL_BITS-1:0]  dram_col,
   output logic                 dram_ap,     // auto-precharge with this RD/WR
   output logic                 dram_wdata_en,
@@ -88,16 +98,21 @@ module mem_ctrl
   logic                            tag_free, rd_slot_ok;
 
   logic [NUM_BANKS-1:0]                bank_open, bank_act_ok, bank_col_ok, bank_pre_ok, bank_idle;
+  logic [NUM_BANKS-1:0]                bank_raa_imt, bank_raa_mmt;
+  logic                                ref_issued;
   logic [NUM_BANKS-1:0][ROW_BITS-1:0]  bank_row;
-  logic                                chan_act_ok, chan_rd_ok, chan_wr_ok, chan_any_ok;
+  logic [NUM_BG-1:0]                   chan_act_ok, chan_rd_ok, chan_wr_ok;
+  logic                                chan_refpb_ok, chan_any_ok;
   logic                                ref_hold;
+  logic [BANK_BITS-1:0]                ref_bank;
   logic [3:0]                          ref_owed;
+  logic [NUM_BANKS-1:0]                wanted;
 
-  dram_cmd_e                       cmd;
-  logic [BANK_BITS-1:0]            cmd_bank;
-  logic [ROW_BITS-1:0]             cmd_row;
-  logic [COL_BITS-1:0]             cmd_col;
-  logic                            cmd_ap;
+  dram_cmd_e                       rcmd, ccmd;
+  logic [BANK_BITS-1:0]            rbank, cbank;
+  logic [ROW_BITS-1:0]             rrow;
+  logic [COL_BITS-1:0]             ccol;
+  logic                            cap;
   logic [1:0][DEPTH-1:0]           serve;  // one-hot entry whose RD/WR issues
 
   assign req_bank  = map_bank(req_addr, ADDR_MAP);
@@ -181,45 +196,56 @@ module mem_ctrl
   );
 
   for (genvar b = 0; b < NUM_BANKS; b++) begin : g_bank
-    logic here;
-    assign here = (cmd_bank == BANK_BITS'(b));
+    logic row_here, col_here;
+    assign row_here = (rbank == BANK_BITS'(b));
+    assign col_here = (cbank == BANK_BITS'(b));
     mc_bank #(.PAGE_TIMEOUT(PAGE_TIMEOUT)) u_bank (
       .clk       (clk),
       .rst_n     (rst_n),
-      .do_act    (cmd == CMD_ACT && here),
-      .do_pre    ((cmd == CMD_PRE && here) || (cmd == CMD_PREA && bank_open[b])),
-      .do_rd     (cmd == CMD_RD && here),
-      .do_wr     (cmd == CMD_WR && here),
-      .do_ap     (cmd_ap),
-      .act_row   (cmd_row),
+      .do_act    (rcmd == CMD_ACT && row_here),
+      .do_pre    ((rcmd == CMD_PRE && row_here) || (rcmd == CMD_PREA && bank_open[b])),
+      .do_rd     (ccmd == CMD_RD && col_here),
+      .do_wr     (ccmd == CMD_WR && col_here),
+      .do_ap     (cap),
+      .do_refpb  (rcmd == CMD_REFPB && row_here),
+      .do_ref    (rcmd == CMD_REF),
+      .act_row   (rrow),
       .is_open   (bank_open[b]),
       .open_row  (bank_row[b]),
       .act_ok    (bank_act_ok[b]),
       .col_ok    (bank_col_ok[b]),
       .pre_ok    (bank_pre_ok[b]),
-      .idle_long (bank_idle[b])
+      .idle_long (bank_idle[b]),
+      .raa_imt   (bank_raa_imt[b]),
+      .raa_mmt   (bank_raa_mmt[b])
     );
   end
 
   mc_chan u_chan (
-    .clk    (clk),
-    .rst_n  (rst_n),
-    .do_act (cmd == CMD_ACT),
-    .do_rd  (cmd == CMD_RD),
-    .do_wr  (cmd == CMD_WR),
-    .do_ref (cmd == CMD_REF),
-    .act_ok (chan_act_ok),
-    .rd_ok  (chan_rd_ok),
-    .wr_ok  (chan_wr_ok),
-    .any_ok (chan_any_ok)
+    .clk      (clk),
+    .rst_n    (rst_n),
+    .do_act   (rcmd == CMD_ACT),
+    .do_refpb (rcmd == CMD_REFPB),
+    .row_bg   (bg_of(rbank)),
+    .do_rd    (ccmd == CMD_RD),
+    .do_wr    (ccmd == CMD_WR),
+    .col_bg   (bg_of(cbank)),
+    .do_ref   (rcmd == CMD_REF),
+    .act_ok   (chan_act_ok),
+    .rd_ok    (chan_rd_ok),
+    .wr_ok    (chan_wr_ok),
+    .refpb_ok (chan_refpb_ok),
+    .any_ok   (chan_any_ok)
   );
 
-  mc_refresh #(.URGENT(REF_URGENT)) u_refresh (
+  mc_refresh #(.URGENT(REF_URGENT), .MODE(REF_MODE)) u_refresh (
     .clk    (clk),
     .rst_n  (rst_n),
     .idle   (q_valid == '0),
-    .do_ref (cmd == CMD_REF),
+    .wanted (wanted),
+    .do_ref (ref_issued),
     .hold   (ref_hold),
+    .bank   (ref_bank),
     .owed   (ref_owed)
   );
 
@@ -228,6 +254,9 @@ module mem_ctrl
     .FR_FCFS      (FR_FCFS),
     .WDRAIN       (WDRAIN),
     .PAGE_POLICY  (PAGE_POLICY),
+    .CMD_BUS      (CMD_BUS),
+    .REF_MODE     (REF_MODE),
+    .RFM_EARLY    (RFM_EARLY),
     .STARVE_LIMIT (STARVE_LIMIT)
   ) u_sched (
     .q_valid     (q_valid),
@@ -245,18 +274,26 @@ module mem_ctrl
     .bank_col_ok (bank_col_ok),
     .bank_pre_ok (bank_pre_ok),
     .bank_idle   (bank_idle),
+    .bank_raa_imt (bank_raa_imt),
+    .bank_raa_mmt (bank_raa_mmt),
     .chan_act_ok (chan_act_ok),
     .chan_rd_ok  (chan_rd_ok),
     .chan_wr_ok  (chan_wr_ok),
+    .chan_refpb_ok (chan_refpb_ok),
     .chan_any_ok (chan_any_ok),
     .rd_slot_ok  (rd_slot_ok),
     .ref_hold    (ref_hold),
-    .cmd         (cmd),
-    .cmd_bank    (cmd_bank),
-    .cmd_row     (cmd_row),
-    .cmd_col     (cmd_col),
-    .cmd_ap      (cmd_ap),
+    .ref_bank    (ref_bank),
+    .rcmd        (rcmd),
+    .rbank       (rbank),
+    .rrow        (rrow),
+    .ccmd        (ccmd),
+    .cbank       (cbank),
+    .ccol        (ccol),
+    .cap         (cap),
     .serve       (serve),
+    .wanted      (wanted),
+    .ref_issued  (ref_issued),
     .w_starve    (w_starve)
   );
 
@@ -269,8 +306,8 @@ module mem_ctrl
     .fwd_data        (fwd_data),
     .tag_alloc       (tag_alloc),
     .tag_free        (tag_free),
-    .rd_issue        (cmd == CMD_RD),
-    .wr_issue        (cmd == CMD_WR),
+    .rd_issue        (ccmd == CMD_RD),
+    .wr_issue        (ccmd == CMD_WR),
     .issue_tag       (issue_tag),
     .issue_wdata     (issue_wdata),
     .rd_slot_ok      (rd_slot_ok),
@@ -283,11 +320,13 @@ module mem_ctrl
     .rsp_rdata       (rsp_rdata)
   );
 
-  assign dram_cmd  = cmd;
-  assign dram_bank = cmd_bank;
-  assign dram_row  = cmd_row;
-  assign dram_col  = cmd_col;
-  assign dram_ap   = cmd_ap;
+  assign dram_rcmd  = rcmd;
+  assign dram_rbank = rbank;
+  assign dram_row   = rrow;
+  assign dram_ccmd  = ccmd;
+  assign dram_cbank = cbank;
+  assign dram_col   = ccol;
+  assign dram_ap    = cap;
 
   // Owed REFs are visible to waveforms and the testbench; the logic uses
   // ref_hold. Reads carry no data and writes need no tag (posted).

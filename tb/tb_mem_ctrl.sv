@@ -1,4 +1,5 @@
-// Directed tests: hit/miss/multi-bank, 4-bank burst, response back-pressure.
+// Directed tests: hit/miss/multi-bank, 4-bank burst, response back-pressure,
+// read forwarding from the write queue.
 // The checkers bound by tb/mc_bind.sv watch the DRAM command pins and the host
 // handshake during every scenario; their results are part of the verdict.
 // A failed check prints "[TB] ERROR ..." and the run continues; the end of the
@@ -27,6 +28,7 @@ module tb_mem_ctrl
   int unsigned access_err_count;
   int unsigned rsp_err_count;      // rsp_err pulses on accepted responses (v1: must stay 0)
   int unsigned ref_count;          // CMD_REF issued to the model
+  int unsigned rd_count;           // CMD_RD issued to the model
   int unsigned max_banks_opening;  // scenario 4: banks with an ACT whose RD/WR has not issued
 
   mem_ctrl_top dut (
@@ -65,22 +67,26 @@ module tb_mem_ctrl
       access_err_count <= 0;
       rsp_err_count    <= 0;
       ref_count        <= 0;
+      rd_count         <= 0;
       opening          <= '0;
     end else begin
       if (dram_access_err)                    access_err_count <= access_err_count + 1;
       if (rsp_valid && rsp_ready && rsp_err)  rsp_err_count    <= rsp_err_count + 1;
       if (dut.d_cmd == CMD_REF)               ref_count        <= ref_count + 1;
+      if (dut.d_cmd == CMD_RD)                rd_count         <= rd_count + 1;
       if (dut.d_cmd == CMD_ACT)               opening[dut.d_bank] <= 1'b1;
       if (dut.d_cmd == CMD_RD || dut.d_cmd == CMD_WR) opening[dut.d_bank] <= 1'b0;
     end
   end
 
+  // Host address of (bank, row, col) under the default map, MAP_XOR:
+  // [row | bank ^ row[1:0] | col]. The scenarios name banks and rows.
   function automatic logic [ADDR_BITS-1:0] make_addr(
     input logic [$clog2(NUM_BANKS)-1:0] b,
     input logic [ROW_BITS-1:0] r,
     input logic [COL_BITS-1:0] c
   );
-    return {b, r, c};
+    return {r, b ^ r[$clog2(NUM_BANKS)-1:0], c};
   endfunction
 
   function automatic int unsigned banks_opening();
@@ -121,12 +127,21 @@ module tb_mem_ctrl
     @(negedge clk);
   endtask
 
+  // Writes are posted: the response comes back at once, the WR later.
   task automatic host_write(
     input logic [ADDR_BITS-1:0] addr,
     input logic [DATA_BITS-1:0] data
   );
     host_accept_write(addr, data);
     host_wait_rsp();
+  endtask
+
+  // Wait until both controller queues are empty, so the next read goes to the
+  // DRAM instead of being forwarded from the write queue.
+  task automatic drain_queues();
+    @(posedge clk);
+    while (dut.u_ctrl.q_valid != '0) @(posedge clk);
+    @(negedge clk);
   endtask
 
   task automatic host_read(
@@ -174,6 +189,7 @@ module tb_mem_ctrl
     req_wdata          = '0;
     rsp_ready          = 1'b1;
 
+    if (dut.ADDR_MAP != MAP_XOR) $fatal(1, "[TB] make_addr assumes ADDR_MAP = MAP_XOR");
     repeat (4) @(posedge clk);
     rst_n = 1'b1;
     repeat (2) @(posedge clk);
@@ -187,11 +203,13 @@ module tb_mem_ctrl
 
     $display("[TB] === SCENARIO 1: page hit WR→RD ===");
     host_write(a_b0_r1, 32'hA5A5_5A5A);
+    drain_queues();
     host_read(a_b0_r1, rdata);
     check_eq("hit RD", rdata, 32'hA5A5_5A5A);
 
     $display("[TB] === SCENARIO 2: page miss (bank0 row change) ===");
     host_write(a_b0_r2, 32'hBEEF_0002);
+    drain_queues();
     host_read(a_b0_r2, rdata);
     check_eq("miss-new RD", rdata, 32'hBEEF_0002);
     host_read(a_b0_r1, rdata);
@@ -199,9 +217,11 @@ module tb_mem_ctrl
 
     $display("[TB] === SCENARIO 3: multi-bank + bank0 conflict ===");
     host_write(a_b1_r3, 32'hC0DE_0001);
+    drain_queues();
     host_read(a_b1_r3, rdata);
     check_eq("bank1 RD", rdata, 32'hC0DE_0001);
     host_write(a_b0_r4, 32'hD00D_0004);
+    drain_queues();
     host_read(a_b0_r4, rdata);
     check_eq("bank0 conflict RD", rdata, 32'hD00D_0004);
     host_read(a_b1_r3, rdata);
@@ -298,6 +318,42 @@ module tb_mem_ctrl
                bp_got, BP_N, ref_count - bp_ref0);
     errs += bp_bad;
 
+    // ------------------------------------------------------------------
+    $display("[TB] === SCENARIO 6: read forwarded from the write queue ===");
+    // Two writes to one address, then a read before they reach the DRAM: the
+    // read must return the younger write's data without a RD on the DRAM pins.
+    // Starting right after a REF keeps the writes queued: no WR within tRFC.
+    drain_queues();
+    begin : fwd
+      int unsigned rd0, got;
+      @(posedge clk);
+      while (dut.d_cmd !== CMD_REF) @(posedge clk);
+      rd0 = rd_count;
+      got = 0;
+      fork
+        begin
+          host_accept_write(a_b2, 32'h6000_0001);
+          host_accept_write(a_b2, 32'h6000_0002);
+          host_accept(1'b0, a_b2, '0);
+        end
+        while (got < 3) begin
+          @(posedge clk);
+          if (rsp_valid === 1'b1 && rsp_ready === 1'b1) begin
+            got++;
+            if (got == 3) rdata = rsp_rdata;
+          end
+        end
+      join
+      check_eq("forwarded RD", rdata, 32'h6000_0002);
+      if (rd_count != rd0) begin
+        $display("[TB] ERROR forwarded read issued %0d RD(s) to the DRAM", rd_count - rd0);
+        errs++;
+      end
+      drain_queues();
+      host_read(a_b2, rdata);
+      check_eq("RD after drain", rdata, 32'h6000_0002);
+    end
+
     repeat (4) @(posedge clk);
 
     if (access_err_count != 0) begin
@@ -332,7 +388,7 @@ module tb_mem_ctrl
     end
 
     if (errs == 0) begin
-      $display("[TB] PASS — hit/miss/multi-bank/burst/back-pressure OK");
+      $display("[TB] PASS — hit/miss/multi-bank/burst/back-pressure/forwarding OK");
       $finish;
     end else begin
       $fatal(1, "[TB] FAIL — %0d error(s)", errs);

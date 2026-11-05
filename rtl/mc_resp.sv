@@ -2,9 +2,11 @@
 // and the tag-ordered response buffer.
 //
 // Read data comes back RL edges after its RD, in RD order, so a FIFO of tags
-// says whose data each data_valid carries. Write data goes out WL edges after
-// its WR. A request is done when its data moves; the host still sees
-// responses in request order (tag_retire).
+// says whose data each data_valid carries; a read is done when its data
+// arrives, or when it is accepted if mem_ctrl forwards it from the write
+// queue. Writes are posted: a write is done when it is accepted. Write data
+// goes out WL edges after its WR. The host sees responses in request order
+// (tag_retire).
 `timescale 1ns/1ps
 
 module mc_resp
@@ -15,6 +17,9 @@ module mc_resp
   input  logic                 clk,
   input  logic                 rst_n,
   input  logic                 acc,          // a request is accepted on this edge
+  input  logic                 acc_write,    // ... and it is a write (answered now)
+  input  logic                 acc_fwd,      // ... or a read answered from the write queue
+  input  logic [DATA_BITS-1:0] fwd_data,
   output logic [TAG_BITS-1:0]  tag_alloc,    // tag the next accepted request gets
   output logic                 tag_free,     // fewer than 2^TAG_BITS - 1 in flight
   input  logic                 rd_issue,
@@ -39,7 +44,6 @@ module mc_resp
   logic [2:0]           rf_cnt;
 
   logic                 wp_v   [WL];
-  logic [TAG_BITS-1:0]  wp_tag [WL];
   logic [DATA_BITS-1:0] wp_d   [WL];
 
   logic [TAG_BITS-1:0]  tag_retire;  // oldest request not yet answered
@@ -62,9 +66,8 @@ module mc_resp
       rf_cnt     <= '0;
       for (int i = 0; i < RF_N; i++) rf_tag[i] <= '0;
       for (int k = 0; k < WL; k++) begin
-        wp_v[k]   <= 1'b0;
-        wp_tag[k] <= '0;
-        wp_d[k]   <= '0;
+        wp_v[k] <= 1'b0;
+        wp_d[k] <= '0;
       end
       for (int i = 0; i < TAG_N; i++) begin
         done[i] <= 1'b0;
@@ -72,6 +75,12 @@ module mc_resp
       end
     end else begin
       if (acc) tag_alloc <= tag_alloc + 1'b1;
+
+      // Posted write (rsp_rdata = 0) or forwarded read: answered now
+      if (acc && (acc_write || acc_fwd)) begin
+        done[tag_alloc] <= 1'b1;
+        data[tag_alloc] <= acc_write ? '0 : fwd_data;
+      end
 
       // Read return
       if (rd_issue) begin
@@ -86,17 +95,11 @@ module mc_resp
       rf_cnt <= rf_cnt + 3'(rd_issue) - 3'(dram_data_valid);
 
       // Write data, WL edges after the WR
-      wp_v[0]   <= wr_issue;
-      wp_tag[0] <= issue_tag;
-      wp_d[0]   <= issue_wdata;
+      wp_v[0] <= wr_issue;
+      wp_d[0] <= issue_wdata;
       for (int k = 1; k < WL; k++) begin
-        wp_v[k]   <= wp_v[k-1];
-        wp_tag[k] <= wp_tag[k-1];
-        wp_d[k]   <= wp_d[k-1];
-      end
-      if (wp_v[WL-1]) begin
-        done[wp_tag[WL-1]] <= 1'b1;
-        data[wp_tag[WL-1]] <= '0;
+        wp_v[k] <= wp_v[k-1];
+        wp_d[k] <= wp_d[k-1];
       end
 
       // In-order responses

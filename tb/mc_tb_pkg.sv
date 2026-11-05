@@ -17,8 +17,9 @@
 package mc_tb_pkg;
   import dram_pkg::*;
 
-  localparam int HANG_CYCLES = 4000;  // no response for this long = the controller is stuck
-  localparam int MAX_REPORTS = 20;
+  localparam int HANG_CYCLES  = 4000;  // no response for this long = the controller is stuck
+  localparam int DRAIN_CYCLES = 2000;  // after the last response, posted writes must reach the DRAM
+  localparam int MAX_REPORTS  = 20;
 
   typedef enum int { P_SEQ, P_RAND, P_STRIDE, P_HOTBANK, P_ROWHIT, P_MIXED } pattern_e;
   typedef enum int { COL_HIT, COL_MISS, COL_CONFLICT } col_kind_e;
@@ -30,8 +31,9 @@ package mc_tb_pkg;
     CV_INFLIGHT_8,
     CV_INFLIGHT_15,     // the response-tag limit
     CV_BANKS_4,         // requests to all four banks in flight at once
-    CV_RAW,             // read accepted while a write to the same address is in flight
-    CV_WAW,             // write accepted while a write to the same address is in flight
+    CV_RAW,             // read answered from a queued write to its address
+    CV_WAW,             // write accepted while a write to the same address is queued
+    CV_WAR,             // write held on the port: a read to its address is queued
     CV_REQ_STALL_TAGS,  // request held back because 15 are in flight
     CV_RSP_STALL_16,    // a response waited 16+ cycles on rsp_ready
     CV_REF_OWED,        // REF while responses are still owed to the host
@@ -42,8 +44,67 @@ package mc_tb_pkg;
     CV_PREA,            // PREA closes the open banks before a REF
     CV_REF_IDLE,        // REF with no request in flight (paid back while idle)
     CV_REF_LOADED,      // REF with 4+ requests in flight (urgent refresh under load)
+    CV_WR_BATCH_4,      // 4+ WRs in a row on the DRAM pins, no RD between
+    CV_AP,              // RD/WR with auto-precharge (PAGE_CLOSE)
+    CV_PRE_IDLE,        // PRE to a bank no queued request needs (PAGE_TIMER)
     CV_N
   } cov_bin_e;
+
+  // ---------------------------------------------------------------------------
+  // Host address -> DRAM (bank, row, col), one function per dram_pkg MAP_*
+  // value. Written with arithmetic instead of the RTL's bit slices, so a
+  // mapping bug in mem_ctrl shows up as a RD/WR that matches no request.
+  // ---------------------------------------------------------------------------
+  localparam int NB = NUM_BANKS;
+  localparam int NR = 1 << ROW_BITS;
+  localparam int NC = 1 << COL_BITS;
+
+  typedef struct packed {
+    logic [BANK_BITS-1:0] bank;
+    logic [ROW_BITS-1:0]  row;
+    logic [COL_BITS-1:0]  col;
+  } loc_t;
+
+  function automatic loc_t tb_loc(logic [ADDR_BITS-1:0] a, int map);
+    loc_t        l;
+    int unsigned v, r;
+    v = int'(a);
+    case (map)
+      1: begin  // row | bank | col
+        l.col  = COL_BITS'(v % NC);
+        l.bank = BANK_BITS'((v / NC) % NB);
+        l.row  = ROW_BITS'(v / (NC * NB));
+      end
+      2: begin  // row | col | bank
+        l.bank = BANK_BITS'(v % NB);
+        l.col  = COL_BITS'((v / NB) % NC);
+        l.row  = ROW_BITS'(v / (NB * NC));
+      end
+      3: begin  // row | bank | col, bank XOR row
+        r      = v / (NC * NB);
+        l.col  = COL_BITS'(v % NC);
+        l.row  = ROW_BITS'(r);
+        l.bank = BANK_BITS'(((v / NC) % NB) ^ (r % NB));
+      end
+      default: begin  // bank | row | col
+        l.col  = COL_BITS'(v % NC);
+        l.row  = ROW_BITS'((v / NC) % NR);
+        l.bank = BANK_BITS'(v / (NC * NR));
+      end
+    endcase
+    return l;
+  endfunction
+
+  // The host address that lands on (bank, row, col): the inverse of tb_loc
+  function automatic logic [ADDR_BITS-1:0] tb_addr(int unsigned b, int unsigned r, int unsigned c,
+                                                   int map);
+    case (map)
+      1:       return ADDR_BITS'((r * NB + b) * NC + c);
+      2:       return ADDR_BITS'((r * NC + c) * NB + b);
+      3:       return ADDR_BITS'((r * NB + (b ^ (r % NB))) * NC + c);
+      default: return ADDR_BITS'((b * NR + r) * NC + c);
+    endcase
+  endfunction
 
   function automatic string pad(string s, int w);
     string r;
@@ -93,6 +154,7 @@ package mc_tb_pkg;
     int unsigned     reuse_pct    = 20;  // chance to reuse a recently written address
     string           csv          = "";  // append one result line to this file
     string           config_name  = "default";  // controller build variant, for the CSV
+    int              addr_map     = 0;   // the build's ADDR_MAP, set by the testbench top
 
     function bit from_plusargs();
       void'($value$plusargs("PATTERN=%s", pattern_name));
@@ -118,9 +180,9 @@ package mc_tb_pkg;
     endfunction
 
     function string show();
-      return $sformatf("config=%s pattern=%s seed=%0d n=%0d rd=%0d%% gap<=%0d bp=%0d%%/%0d stride=%0d hot=%0d%% reuse=%0d%%",
-                       config_name, pattern_name, seed, n_txn, rd_pct, gap_max, bp_pct, bp_max, stride,
-                       hot_pct, reuse_pct);
+      return $sformatf("config=%s map=%0d pattern=%s seed=%0d n=%0d rd=%0d%% gap<=%0d bp=%0d%%/%0d stride=%0d hot=%0d%% reuse=%0d%%",
+                       config_name, addr_map, pattern_name, seed, n_txn, rd_pct, gap_max, bp_pct, bp_max,
+                       stride, hot_pct, reuse_pct);
     endfunction
   endclass
 
@@ -128,14 +190,16 @@ package mc_tb_pkg;
     int unsigned          id;
     bit                   write;
     logic [ADDR_BITS-1:0] addr;
+    loc_t                 loc;        // where the build's address map puts addr
     logic [DATA_BITS-1:0] wdata;
     logic [DATA_BITS-1:0] exp_rdata;  // set by the scoreboard when the request is accepted
     longint               t_accept;
     bit                   col_issued; // its RD/WR has appeared on the DRAM pins
+    bit                   forwarded;  // a read answered from a queued write
 
     function string show();
-      return $sformatf("#%0d %s bank %0d row %02h col %0h", id, write ? "WR" : "RD",
-                       addr_bank(addr), addr_row(addr), addr_col(addr));
+      return $sformatf("#%0d %s %04h (bank %0d row %02h col %0h)", id, write ? "WR" : "RD",
+                       addr, loc.bank, loc.row, loc.col);
     endfunction
   endclass
 
@@ -145,7 +209,10 @@ package mc_tb_pkg;
     longint               t;
   endclass
 
-  // Address streams. P_MIXED picks one of the other five per request.
+  // Address streams. seq, stride and rand walk host addresses, so the address
+  // map decides which banks they use; hotbank and rowhit are built in DRAM
+  // coordinates (tb_addr) and mean the same under every map. P_MIXED picks one
+  // of the other five per request.
   class mc_sequence;
     mc_cfg            cfg;
     mc_rng            rng;
@@ -176,11 +243,11 @@ package mc_tb_pkg;
         end
         P_HOTBANK: begin
           b = rng.chance(cfg.hot_pct) ? '0 : BANK_BITS'(rng.next());
-          a = {b, ROW_BITS'(rng.next()), COL_BITS'(rng.next())};
+          a = tb_addr(b, rng.below(NR), rng.below(NC), cfg.addr_map);
         end
         P_ROWHIT: begin  // one fixed row per bank: hits once the rows are open
           b = BANK_BITS'(rng.next());
-          a = {b, hot_row[b], COL_BITS'(rng.next())};
+          a = tb_addr(b, hot_row[b], rng.below(NC), cfg.addr_map);
         end
         default: a = ADDR_BITS'(rng.next());  // P_RAND
       endcase
@@ -199,6 +266,7 @@ package mc_tb_pkg;
         t.addr = recent[rng.below(recent.size())];
       else
         t.addr = addr_for(p);
+      t.loc   = tb_loc(t.addr, cfg.addr_map);
       t.wdata = rng.next();
       if (t.write) begin
         recent.push_back(t.addr);
@@ -263,9 +331,12 @@ package mc_tb_pkg;
         @(posedge vif.clk);
         while (vif.req_ready !== 1'b1) @(posedge vif.clk);
         t.t_accept = vif.cyc;
+        // Hand it over after the edge, once the pin monitor has logged the
+        // commands of the accept edge: the scoreboard then sees exactly the
+        // writes the controller still held when it accepted this request.
+        @(negedge vif.clk);
         accepted.put(t);
         n_sent++;
-        @(negedge vif.clk);
       end
     endtask
   endclass
@@ -345,8 +416,9 @@ package mc_tb_pkg;
       label[CV_INFLIGHT_8]     = "8+ requests in flight";
       label[CV_INFLIGHT_15]    = "15 in flight (tag limit)";
       label[CV_BANKS_4]        = "all four banks in flight";
-      label[CV_RAW]            = "read after write, same address";
-      label[CV_WAW]            = "write after write, same address";
+      label[CV_RAW]            = "read forwarded from a queued write";
+      label[CV_WAW]            = "write behind a queued write";
+      label[CV_WAR]            = "write held behind a queued read";
       label[CV_REQ_STALL_TAGS] = "request held at the tag limit";
       label[CV_RSP_STALL_16]   = "response waits 16+ cycles";
       label[CV_REF_OWED]       = "REF with responses still owed";
@@ -357,6 +429,9 @@ package mc_tb_pkg;
       label[CV_PREA]           = "PREA before REF";
       label[CV_REF_IDLE]       = "REF with nothing in flight";
       label[CV_REF_LOADED]     = "REF with 4+ requests in flight";
+      label[CV_WR_BATCH_4]     = "4+ WRs in a row on the DRAM bus";
+      label[CV_AP]             = "RD/WR with auto-precharge";
+      label[CV_PRE_IDLE]       = "PRE to a bank nobody waits for";
       short_name[CV_RD_HIT]         = "rd_hit";
       short_name[CV_RD_MISS]        = "rd_miss";
       short_name[CV_RD_CONFLICT]    = "rd_conflict";
@@ -369,6 +444,7 @@ package mc_tb_pkg;
       short_name[CV_BANKS_4]        = "banks_4";
       short_name[CV_RAW]            = "raw";
       short_name[CV_WAW]            = "waw";
+      short_name[CV_WAR]            = "war";
       short_name[CV_REQ_STALL_TAGS] = "req_stall_tags";
       short_name[CV_RSP_STALL_16]   = "rsp_stall_16";
       short_name[CV_REF_OWED]       = "ref_owed";
@@ -379,6 +455,9 @@ package mc_tb_pkg;
       short_name[CV_PREA]           = "prea";
       short_name[CV_REF_IDLE]       = "ref_idle";
       short_name[CV_REF_LOADED]     = "ref_loaded";
+      short_name[CV_WR_BATCH_4]     = "wr_batch_4";
+      short_name[CV_AP]             = "ap";
+      short_name[CV_PRE_IDLE]       = "pre_idle";
       foreach (hits[i]) hits[i] = 0;
     endfunction
 
@@ -400,16 +479,20 @@ package mc_tb_pkg;
     endfunction
   endclass
 
-  // Predicts each response when its request is accepted. Same-address order
-  // holds because one bank engine serves one request at a time, oldest first,
-  // so a read accepted after a write to its address must see that write.
+  // Predicts each response when its request is accepted: a read must see
+  // every write accepted before it, whatever order the DRAM commands take.
+  // Writes are posted (answered at once with rsp_rdata = 0); the pin monitor
+  // checks that each one still reaches the DRAM.
   class mc_scoreboard;
     mailbox #(mc_txn)     accepted;
     mailbox #(mc_rsp)     responses;
     mc_coverage           cov;
     logic [DATA_BITS-1:0] mem [logic [ADDR_BITS-1:0]];  // reference memory
     mc_txn                pending [$];                  // accepted, not yet answered
+    mc_txn                unissued [$];                 // accepted, RD/WR not yet on the pins
+    longint               last_wr [logic [ADDR_BITS-1:0]];  // edge of the last WR per address
     longint               lat [$];                      // accept -> response, cycles
+    longint               rd_lat [$];                   // the same, reads only
     int unsigned          n_acc, n_rsp, n_bad, n_report;
     longint               t_first, t_last;
 
@@ -434,26 +517,32 @@ package mc_tb_pkg;
     endfunction
 
     function void predict(mc_txn t);
-      bit                 raw, waw;
+      bit                 waw, raw;
       bit [NUM_BANKS-1:0] banks;
-      raw   = 1'b0;
       waw   = 1'b0;
+      raw   = 1'b0;
       banks = '0;
-      foreach (pending[i]) begin
-        banks[addr_bank(pending[i].addr)] = 1'b1;
-        if (pending[i].write && pending[i].addr == t.addr) begin
+      foreach (unissued[i]) begin
+        banks[unissued[i].loc.bank] = 1'b1;
+        if (unissued[i].write && unissued[i].addr == t.addr) begin
           if (t.write) waw = 1'b1;
           else         raw = 1'b1;
         end
       end
+      // A write whose WR went out on the accept edge was still queued then
+      if (!t.write && last_wr.exists(t.addr) && last_wr[t.addr] == t.t_accept) raw = 1'b1;
       if (t.write) begin
         mem[t.addr] = t.wdata;
         t.exp_rdata = '0;  // a write answers with rsp_rdata = 0 (docs/spec.md, section 4)
       end else begin
         t.exp_rdata = mem.exists(t.addr) ? mem[t.addr] : '0;  // the model resets to 0
       end
+      // A read whose address was in the write queue on its accept edge is
+      // answered from there and must never reach the DRAM.
+      t.forwarded = raw;
       pending.push_back(t);
-      banks[addr_bank(t.addr)] = 1'b1;
+      if (!raw) unissued.push_back(t);
+      banks[t.loc.bank] = 1'b1;
       n_acc++;
       if (t_first < 0) t_first = t.t_accept;
       if (raw)                  cov.hit(CV_RAW);
@@ -474,8 +563,9 @@ package mc_tb_pkg;
       end
       t = pending.pop_front();
       lat.push_back(r.t - t.t_accept);
-      if (!t.col_issued)
-        fail($sformatf("%s: answered before its RD/WR reached the DRAM", t.show()));
+      if (!t.write) rd_lat.push_back(r.t - t.t_accept);
+      if (!t.write && !t.forwarded && !t.col_issued)
+        fail($sformatf("%s: answered before its RD reached the DRAM", t.show()));
       if (r.err)
         fail($sformatf("%s: rsp_err set", t.show()));
       if (r.rdata !== t.exp_rdata)
@@ -514,20 +604,27 @@ package mc_tb_pkg;
     // DRAM-side activity, fed by the testbench top from the command pins
     longint      col_kind [2][3];  // [write][col_kind_e]
     longint      data_beats;
-    bit          hung;
+    longint      turns;            // RD <-> WR switches between column commands
+    int          last_dir;         // -1 none yet, 0 RD, 1 WR
+    int unsigned wr_run;           // WRs in a row
+    bit          hung, lost_writes;
     int unsigned stall_run;
 
     // Results of report(), also written to the CSV line
-    longint span, lat_p50, lat_p99, lat_max;
-    real    lat_avg, util_pct, hit_pct;
+    longint span, lat_p50, lat_p99, lat_max, rd_lat_p99;
+    real    lat_avg, rd_lat_avg, util_pct, hit_pct;
 
     function new(virtual mc_host_if v);
       vif        = v;
       cfg        = new();
       cov        = new();
-      data_beats = 0;
-      hung       = 1'b0;
-      stall_run  = 0;
+      data_beats  = 0;
+      turns       = 0;
+      last_dir    = -1;
+      wr_run      = 0;
+      hung        = 1'b0;
+      lost_writes = 1'b0;
+      stall_run   = 0;
       for (int w = 0; w < 2; w++)
         for (int k = 0; k < 3; k++) col_kind[w][k] = 0;
     endfunction
@@ -547,6 +644,13 @@ package mc_tb_pkg;
       sb      = new(drv2sb, mon2sb, cov);
     endfunction
 
+    // A queued read to the address of the write on the port
+    function bit port_collides();
+      foreach (sb.unissued[i])
+        if (!sb.unissued[i].write && sb.unissued[i].addr == vif.req_addr) return 1'b1;
+      return 1'b0;
+    endfunction
+
     // Cycle-level coverage on the host port.
     task sample();
       forever begin
@@ -554,6 +658,9 @@ package mc_tb_pkg;
         if (vif.rst_n === 1'b1) begin
           if (vif.req_valid === 1'b1 && vif.req_ready !== 1'b1 && sb.pending.size() >= 15)
             cov.hit(CV_REQ_STALL_TAGS);
+          if (vif.req_valid === 1'b1 && vif.req_write === 1'b1 && vif.req_ready !== 1'b1 &&
+              port_collides())
+            cov.hit(CV_WAR);
           if (vif.rsp_valid === 1'b1 && vif.rsp_ready !== 1'b1) begin
             stall_run++;
             if (stall_run == 16) cov.hit(CV_RSP_STALL_16);
@@ -589,6 +696,11 @@ package mc_tb_pkg;
         end
       end
       repeat (40) @(posedge vif.clk);  // an extra response would arrive here
+      // Posted writes may still sit in the write queue; they must reach the DRAM.
+      last_t = vif.cyc;
+      while (sb.unissued.size() != 0 && !hung && vif.cyc - last_t <= longint'(DRAIN_CYCLES))
+        @(posedge vif.clk);
+      lost_writes = (sb.unissued.size() != 0);
     endtask
 
     function void note_col(bit write, col_kind_e k);
@@ -596,24 +708,39 @@ package mc_tb_pkg;
       cov.hit(cov_bin_e'(int'(write) * 3 + int'(k)));
     endfunction
 
-    // Match a RD/WR on the DRAM pins to the oldest pending request with the same
-    // address and direction. Serving it while an older request still waits for its
-    // own RD/WR is a reorder (legal across banks); no match at all is an error.
-    function void note_col_cmd(bit write, logic [ADDR_BITS-1:0] a);
-      bit older_waiting;
-      older_waiting = 1'b0;
-      foreach (sb.pending[i]) begin
-        if (!sb.pending[i].col_issued) begin
-          if (sb.pending[i].addr == a && sb.pending[i].write == write) begin
-            sb.pending[i].col_issued = 1'b1;
-            if (older_waiting) cov.hit(CV_REORDER);
-            return;
-          end
-          older_waiting = 1'b1;
+    // Match a RD/WR on the DRAM pins to the oldest request that is still waiting
+    // for one, with the same direction and DRAM location. Serving it while an
+    // older request still waits is a reorder (legal); no match is an error.
+    // edge: the clock edge index of the command (the top passes hif.cyc, which it
+    // reads before that edge's update; a class read of vif.cyc may see it after)
+    function void note_col_cmd(bit write, loc_t l, bit ap, longint edge_idx);
+      if (last_dir >= 0 && last_dir != int'(write)) turns++;
+      last_dir = int'(write);
+      wr_run   = write ? wr_run + 1 : 0;
+      if (wr_run == 4) cov.hit(CV_WR_BATCH_4);
+      if (ap) cov.hit(CV_AP);
+      foreach (sb.unissued[i]) begin
+        if (sb.unissued[i].loc == l && sb.unissued[i].write == write) begin
+          sb.unissued[i].col_issued = 1'b1;
+          if (write) sb.last_wr[sb.unissued[i].addr] = edge_idx;
+          if (i != 0) cov.hit(CV_REORDER);
+          sb.unissued.delete(i);
+          return;
         end
       end
-      sb.fail($sformatf("%s to bank %0d row %02h col %0h matches no pending request",
-                        write ? "WR" : "RD", addr_bank(a), addr_row(a), addr_col(a)));
+      sb.fail($sformatf("%s to bank %0d row %02h col %0h matches no queued request",
+                        write ? "WR" : "RD", l.bank, l.row, l.col));
+    endfunction
+
+    // A request is still waiting for a RD/WR on bank b
+    function bit bank_wanted(int b);
+      foreach (sb.unissued[i])
+        if (int'(sb.unissued[i].loc.bank) == b) return 1'b1;
+      return 1'b0;
+    endfunction
+
+    function void note_pre_idle();
+      cov.hit(CV_PRE_IDLE);
     endfunction
 
     function void note_beat();
@@ -649,6 +776,12 @@ package mc_tb_pkg;
       lat_p50 = (s.size() != 0) ? s[(s.size() - 1) / 2] : 0;
       lat_p99 = (s.size() != 0) ? s[(s.size() * 99 + 99) / 100 - 1] : 0;
       lat_max = (s.size() != 0) ? s[s.size() - 1] : 0;
+      s = sb.rd_lat;
+      s.sort();
+      sum = 0;
+      foreach (s[i]) sum += s[i];
+      rd_lat_avg = (s.size() != 0) ? real'(sum) / real'(s.size()) : 0.0;
+      rd_lat_p99 = (s.size() != 0) ? s[(s.size() * 99 + 99) / 100 - 1] : 0;
       span     = (sb.t_first >= 0) ? sb.t_last - sb.t_first + 1 : 0;
       util_pct = (span > 0) ? 100.0 * real'(data_beats) / real'(span) : 0.0;
       hits  = col_kind[0][COL_HIT] + col_kind[1][COL_HIT];
@@ -667,11 +800,18 @@ package mc_tb_pkg;
         $display("[RAND] ERROR %0d responses for %0d requests", sb.n_rsp, cfg.n_txn);
         problems++;
       end
+      if (lost_writes) begin
+        $display("[RAND] ERROR %0d accepted request(s) never reached the DRAM, first %s",
+                 sb.unissued.size(), sb.unissued[0].show());
+        problems++;
+      end
 
       $display("[RAND] responses %0d/%0d, data mismatches %0d", sb.n_rsp, cfg.n_txn, sb.n_bad);
       $display("[RAND] span %0d cycles, data bus busy %0.1f%%", span, util_pct);
       $display("[RAND] latency (accept -> response) avg %0.1f, p50 %0d, p99 %0d, max %0d cycles",
                lat_avg, lat_p50, lat_p99, lat_max);
+      $display("[RAND] read latency avg %0.1f, p99 %0d cycles; RD<->WR turnarounds %0d",
+               rd_lat_avg, rd_lat_p99, turns);
       $display("[RAND] read hit/miss/conflict %0d/%0d/%0d, write %0d/%0d/%0d, row hit rate %0.1f%%",
                col_kind[0][COL_HIT], col_kind[0][COL_MISS], col_kind[0][COL_CONFLICT],
                col_kind[1][COL_HIT], col_kind[1][COL_MISS], col_kind[1][COL_CONFLICT], hit_pct);
@@ -696,15 +836,16 @@ package mc_tb_pkg;
       end
       if (need_header) begin
         line = {"config,pattern,seed,n,result,problems,span,util_pct,lat_avg,lat_p50,lat_p99,lat_max,",
+                "rd_lat_avg,rd_lat_p99,turns,",
                 "rd_hit,rd_miss,rd_conflict,wr_hit,wr_miss,wr_conflict,hit_pct,",
                 "refs,ref_int_avg,ref_int_max,ref_debt_max,violations,waived,mismatches"};
         foreach (cov.short_name[i]) line = {line, ",cv_", cov.short_name[i]};
         $fdisplay(fd, "%s", line);
       end
       result = (problems == 0) ? "PASS" : "FAIL";
-      line = $sformatf("%s,%s,%0d,%0d,%s,%0d,%0d,%0.2f,%0.2f,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0.2f,%0d,%0.2f,%0d,%0d,%0d,%0d,%0d",
+      line = $sformatf("%s,%s,%0d,%0d,%s,%0d,%0d,%0.2f,%0.2f,%0d,%0d,%0d,%0.2f,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0.2f,%0d,%0.2f,%0d,%0d,%0d,%0d,%0d",
                        cfg.config_name, cfg.pattern_name, cfg.seed, cfg.n_txn, result, problems, span, util_pct,
-                       lat_avg, lat_p50, lat_p99, lat_max,
+                       lat_avg, lat_p50, lat_p99, lat_max, rd_lat_avg, rd_lat_p99, turns,
                        col_kind[0][COL_HIT], col_kind[0][COL_MISS], col_kind[0][COL_CONFLICT],
                        col_kind[1][COL_HIT], col_kind[1][COL_MISS], col_kind[1][COL_CONFLICT],
                        hit_pct, n_ref, ref_avg, ref_max, debt_max, violations, waived, sb.n_bad);

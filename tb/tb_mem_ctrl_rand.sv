@@ -18,6 +18,12 @@ module tb_mem_ctrl_rand
   // mem_ctrl parameters, settable at build time (verilator -G<name>=<value>)
   parameter int P_DEPTH        = QUEUE_DEPTH,
   parameter bit P_FR_FCFS      = 1'b1,
+  parameter bit P_WDRAIN       = 1'b1,
+  parameter int P_WR_HI        = 6,
+  parameter int P_WR_LO        = 2,
+  parameter int P_PAGE_POLICY  = PAGE_OPEN,
+  parameter int P_PAGE_TIMEOUT = 16,
+  parameter int P_ADDR_MAP     = MAP_XOR,
   parameter int P_RD_PIPE      = 4,
   parameter int P_STARVE_LIMIT = 160,
   parameter int P_REF_URGENT   = 4
@@ -36,6 +42,12 @@ module tb_mem_ctrl_rand
   mem_ctrl_top #(
     .DEPTH        (P_DEPTH),
     .FR_FCFS      (P_FR_FCFS),
+    .WDRAIN       (P_WDRAIN),
+    .WR_HI        (P_WR_HI),
+    .WR_LO        (P_WR_LO),
+    .PAGE_POLICY  (P_PAGE_POLICY),
+    .PAGE_TIMEOUT (P_PAGE_TIMEOUT),
+    .ADDR_MAP     (P_ADDR_MAP),
     .RD_PIPE      (P_RD_PIPE),
     .STARVE_LIMIT (P_STARVE_LIMIT),
     .REF_URGENT   (P_REF_URGENT)
@@ -60,7 +72,8 @@ module tb_mem_ctrl_rand
 
   // A column command with no ACT on its bank since the previous column command
   // is a row hit. An ACT after a PRE makes it a conflict, an ACT on a closed
-  // bank a miss. PREA and REF close every row for refresh, not for a conflict.
+  // bank a miss. Auto-precharge, PREA and REF close rows without a conflict,
+  // and so does a PRE to a bank no queued request needs (PAGE_TIMER).
   // A data beat is a cycle with read data or write data on the DRAM bus.
   bit          act_seen [NUM_BANKS];
   bit          pre_seen [NUM_BANKS];
@@ -85,12 +98,16 @@ module tb_mem_ctrl_rand
       end
       if (dut.d_wdata_en) env.note_beat();
       case (dut.d_cmd)
-        CMD_PRE: pre_seen[b] = 1'b1;
+        CMD_PRE: begin
+          if (env.bank_wanted(int'(b))) pre_seen[b] = 1'b1;
+          else                          env.note_pre_idle();
+        end
         CMD_ACT: act_seen[b] = 1'b1;
         CMD_RD, CMD_WR: begin
           env.note_col(dut.d_cmd == CMD_WR,
                        !act_seen[b] ? COL_HIT : (pre_seen[b] ? COL_CONFLICT : COL_MISS));
-          env.note_col_cmd(dut.d_cmd == CMD_WR, {dut.d_bank, dut.d_row, dut.d_col});
+          env.note_col_cmd(dut.d_cmd == CMD_WR, {dut.d_bank, dut.d_row, dut.d_col}, dut.d_ap,
+                           hif.cyc);
           if (dut.d_cmd == CMD_RD) begin
             rds_in_flight++;
             env.note_rd_depth(rds_in_flight);
@@ -114,6 +131,7 @@ module tb_mem_ctrl_rand
   initial begin
     int unsigned problems;
     env = new(hif);
+    env.cfg.addr_map = P_ADDR_MAP;
     if (!env.cfg.from_plusargs())
       $fatal(1, "[RAND] unknown +PATTERN=%s (seq, rand, stride, hotbank, rowhit, mixed)",
              env.cfg.pattern_name);

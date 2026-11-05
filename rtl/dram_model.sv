@@ -5,6 +5,10 @@
 //                    by the controller on edge t + RL (RL = tCL + 1)
 //   WR on edge t  -> the controller drives wdata_en and wdata for edge t + WL
 //
+// A RD/WR with ap = 1 (auto-precharge) closes its bank after the access; the
+// device would precharge once tRAS, tRTP and write recovery allow, and the
+// checker times the next ACT from that point.
+//
 // It checks state, not spacing; tb/dram_timing_checker.sv checks the spacing.
 // access_err pulses for: ACT to an open bank, RD/WR to a closed bank or another
 // row, REF while a bank is open, any command inside tRFC, write data that does
@@ -21,6 +25,7 @@ module dram_model
   input  logic [BANK_BITS-1:0] bank,
   input  logic [ROW_BITS-1:0]  row,
   input  logic [COL_BITS-1:0]  col,
+  input  logic                 ap,            // auto-precharge with this RD/WR
   input  logic                 wdata_en,
   input  logic [DATA_BITS-1:0] wdata,
 
@@ -145,6 +150,7 @@ module dram_model
             rd_v[0]    <= 1'b1;
             rd_ok[0]   <= hit_now;
             rd_a[0]    <= idx_now;
+            if (ap) bank_open[bank] <= 1'b0;
           end
           CMD_WR: begin
             page_hit   <= hit_now;
@@ -152,6 +158,7 @@ module dram_model
             wr_v[0]    <= 1'b1;
             wr_ok[0]   <= hit_now;
             wr_a[0]    <= idx_now;
+            if (ap) bank_open[bank] <= 1'b0;
           end
           CMD_REF: begin
             if (any_open) access_err <= 1'b1;

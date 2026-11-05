@@ -11,7 +11,7 @@ from pathlib import Path
 from cocotb_tools.runner import get_results, get_runner
 
 ROOT = Path(__file__).resolve().parent.parent
-RTL = ["dram_pkg.sv", "host_if.sv", "dram_model.sv", "mc_queue.sv", "mc_bank.sv",
+RTL = ["dram_pkg.sv", "host_if.sv", "dram_model.sv", "mc_queue.sv", "mc_xage.sv", "mc_wdrain.sv", "mc_bank.sv",
        "mc_chan.sv", "mc_refresh.sv", "mc_sched.sv", "mc_resp.sv", "mem_ctrl.sv",
        "mem_ctrl_top.sv"]
 BUILD_DIR = ROOT / "sim_build"

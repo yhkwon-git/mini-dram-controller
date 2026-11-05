@@ -26,6 +26,7 @@ module dram_timing_checker
   input dram_cmd_e            cmd,
   input logic [BANK_BITS-1:0] bank,
   input logic [ROW_BITS-1:0]  row,
+  input logic                 ap,
   input logic                 data_valid,
   input logic                 wdata_en
 );
@@ -75,6 +76,7 @@ module dram_timing_checker
   longint              n_ref, ref_gap_sum, ref_gap_max, debt_max;
   bit                  debt_flagged;
   longint              n_cmd [8];
+  longint              n_ap;
 
   function automatic bit is_waived(int k);
     return (k == K_REF_OPEN && WAIVE_REF_OPEN) || (k == K_REF_DEBT && WAIVE_REF_DEBT);
@@ -96,6 +98,7 @@ module dram_timing_checker
     end
     for (int i = 0; i < 4; i++) act_hist[i] = NONE;
     for (int c = 0; c < 8; c++) n_cmd[c] = 0;
+    n_ap         = 0;
     n_act_hist   = 0;
     t_col        = NONE;
     t_rd_any     = NONE;
@@ -117,7 +120,7 @@ module dram_timing_checker
 
   initial begin
     label[K_TRCD]       = "tRCD  ACT -> RD/WR";
-    label[K_TRP]        = "tRP   PRE/PREA -> ACT/REF";
+    label[K_TRP]        = "tRP   PRE/PREA/AP -> ACT/REF";
     label[K_TRAS]       = "tRAS  ACT -> PRE/PREA";
     label[K_TRC]        = "tRC   ACT -> ACT, same bank";
     label[K_TRTP]       = "tRTP  RD -> PRE/PREA";
@@ -261,6 +264,16 @@ module dram_timing_checker
             flag(K_COL_ROW, $sformatf("bank %0d: open row %0h, command row %0h", b, row_b[b], row));
           gap(K_TRCD, t_act[b], b);
         end
+        // Auto-precharge: the device closes the bank on the first edge a PRE
+        // would meet tRAS and tRTP (RD) or write recovery (WR). That edge may
+        // lie in the future; the next ACT or REF must still be tRP after it.
+        if (ap && open_b[b]) begin
+          n_ap++;
+          open_b[b] = 1'b0;
+          t_pre[b]  = t_act[b] + longint'(tRAS);
+          if (cmd == CMD_RD && t + longint'(tRTP) > t_pre[b])         t_pre[b] = t + longint'(tRTP);
+          if (cmd == CMD_WR && t + longint'(WL + 1 + tWR) > t_pre[b]) t_pre[b] = t + longint'(WL + 1 + tWR);
+        end
         gap(K_TCCD, t_col, b);
         if (cmd == CMD_RD) begin
           gap(K_TWTR, t_wr_any, b);
@@ -362,8 +375,8 @@ module dram_timing_checker
       if (is_waived(k) && n_bad[k] != 0) note = "  waived";
       $display("[TCHK] %s %s%s", pad(label[k], 28), lpad($sformatf("%0d", n_bad[k]), 31), note);
     end
-    $display("[TCHK] commands: ACT %0d, RD %0d, WR %0d, PRE %0d, PREA %0d, REF %0d",
-             n_cmd[int'(CMD_ACT)], n_cmd[int'(CMD_RD)], n_cmd[int'(CMD_WR)],
+    $display("[TCHK] commands: ACT %0d, RD %0d, WR %0d (%0d with auto-precharge), PRE %0d, PREA %0d, REF %0d",
+             n_cmd[int'(CMD_ACT)], n_cmd[int'(CMD_RD)], n_cmd[int'(CMD_WR)], n_ap,
              n_cmd[int'(CMD_PRE)], n_cmd[int'(CMD_PREA)], n_cmd[int'(CMD_REF)]);
     if (n_ref > 1)
       $display("[TCHK] REF interval avg %0.1f, max %0d edges (tREFI %0d); peak REFs owed %0d",

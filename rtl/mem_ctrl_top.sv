@@ -7,6 +7,12 @@ module mem_ctrl_top
 #(
   parameter int DEPTH        = QUEUE_DEPTH,
   parameter bit FR_FCFS      = 1'b1,
+  parameter bit WDRAIN       = 1'b1,
+  parameter int WR_HI        = 6,
+  parameter int WR_LO        = 2,
+  parameter int PAGE_POLICY  = PAGE_OPEN,
+  parameter int PAGE_TIMEOUT = 16,
+  parameter int ADDR_MAP     = MAP_XOR,
   parameter int RD_PIPE      = 4,
   parameter int STARVE_LIMIT = 160,
   parameter int REF_URGENT   = 4
@@ -41,6 +47,7 @@ module mem_ctrl_top
   logic [BANK_BITS-1:0] d_bank;
   logic [ROW_BITS-1:0]  d_row;
   logic [COL_BITS-1:0]  d_col;
+  logic                 d_ap;
   logic                 d_wdata_en;
   logic [DATA_BITS-1:0] d_wdata;
   logic                 d_busy, d_data_valid, d_page_hit, d_access_err;
@@ -76,6 +83,12 @@ module mem_ctrl_top
   mem_ctrl #(
     .DEPTH        (DEPTH),
     .FR_FCFS      (FR_FCFS),
+    .WDRAIN       (WDRAIN),
+    .WR_HI        (WR_HI),
+    .WR_LO        (WR_LO),
+    .PAGE_POLICY  (PAGE_POLICY),
+    .PAGE_TIMEOUT (PAGE_TIMEOUT),
+    .ADDR_MAP     (ADDR_MAP),
     .RD_PIPE      (RD_PIPE),
     .STARVE_LIMIT (STARVE_LIMIT),
     .REF_URGENT   (REF_URGENT)
@@ -95,6 +108,7 @@ module mem_ctrl_top
     .dram_bank       (d_bank),
     .dram_row        (d_row),
     .dram_col        (d_col),
+    .dram_ap         (d_ap),
     .dram_wdata_en   (d_wdata_en),
     .dram_wdata      (d_wdata),
     .dram_data_valid (d_data_valid),
@@ -108,6 +122,7 @@ module mem_ctrl_top
     .bank         (d_bank),
     .row          (d_row),
     .col          (d_col),
+    .ap           (d_ap),
     .wdata_en     (d_wdata_en),
     .wdata        (d_wdata),
     .busy         (d_busy),

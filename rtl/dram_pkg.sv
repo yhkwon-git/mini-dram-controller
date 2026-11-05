@@ -1,4 +1,4 @@
-// Mini-DRAM package: geometry, timing, commands, address helpers (docs/spec.md).
+// Mini-DRAM package: geometry, timing, commands, page policies, address maps (docs/spec.md).
 `timescale 1ns/1ps
 
 package dram_pkg;
@@ -12,7 +12,7 @@ package dram_pkg;
   localparam int COL_BITS    = 4;    // 16 columns per row
   localparam int DATA_BITS   = 32;   // one RD/WR moves one 32-bit burst, one cycle on the data bus
   localparam int ADDR_BITS   = BANK_BITS + ROW_BITS + COL_BITS;  // 14
-  localparam int QUEUE_DEPTH = 8;    // request queue entries (mem_ctrl parameter default)
+  localparam int QUEUE_DEPTH = 8;    // entries per queue: 8 reads + 8 writes (mem_ctrl DEPTH)
   localparam int TAG_BITS    = 4;    // response tags: at most 15 requests in flight
 
   // ---------------------------------------------------------------------------
@@ -55,18 +55,45 @@ package dram_pkg;
   } dram_cmd_e;
 
   // ---------------------------------------------------------------------------
-  // Host address map: [bank | row | col]
+  // Page policy (mem_ctrl parameter PAGE_POLICY)
   // ---------------------------------------------------------------------------
-  function automatic logic [BANK_BITS-1:0] addr_bank(input logic [ADDR_BITS-1:0] a);
-    return a[ADDR_BITS-1 -: BANK_BITS];
+  localparam int PAGE_OPEN  = 0;  // a row stays open until a conflict or refresh closes it
+  localparam int PAGE_CLOSE = 1;  // RD/WR with auto-precharge unless a queued request hits the row
+  localparam int PAGE_TIMER = 2;  // open, and PRE a row nobody wants after PAGE_TIMEOUT idle cycles
+
+  // ---------------------------------------------------------------------------
+  // Address maps (mem_ctrl parameter ADDR_MAP). The host address is a word
+  // address; every map is a bijection onto (bank, row, col), MSB first.
+  // ---------------------------------------------------------------------------
+  localparam int MAP_BRC = 0;  // [bank | row | col]  a quarter of the space per bank (v1, v2)
+  localparam int MAP_RBC = 1;  // [row | bank | col]  one row of columns, then the next bank
+  localparam int MAP_RCB = 2;  // [row | col | bank]  consecutive words rotate through the banks
+  localparam int MAP_XOR = 3;  // [row | bank | col], bank XOR the low row bits (v3 default)
+
+  // Each map reads different bits of a; lint sees one map per build.
+  /* verilator lint_off UNUSEDSIGNAL */
+  function automatic logic [BANK_BITS-1:0] map_bank(input logic [ADDR_BITS-1:0] a, input int map);
+    case (map)
+      MAP_RBC: return a[COL_BITS +: BANK_BITS];
+      MAP_RCB: return a[BANK_BITS-1:0];
+      MAP_XOR: return a[COL_BITS +: BANK_BITS] ^ a[COL_BITS + BANK_BITS +: BANK_BITS];
+      default: return a[ADDR_BITS-1 -: BANK_BITS];
+    endcase
   endfunction
 
-  function automatic logic [ROW_BITS-1:0] addr_row(input logic [ADDR_BITS-1:0] a);
-    return a[COL_BITS +: ROW_BITS];
+  function automatic logic [ROW_BITS-1:0] map_row(input logic [ADDR_BITS-1:0] a, input int map);
+    case (map)
+      MAP_RBC, MAP_RCB, MAP_XOR: return a[ADDR_BITS-1 -: ROW_BITS];
+      default:                   return a[COL_BITS +: ROW_BITS];
+    endcase
   endfunction
 
-  function automatic logic [COL_BITS-1:0] addr_col(input logic [ADDR_BITS-1:0] a);
-    return a[COL_BITS-1:0];
+  function automatic logic [COL_BITS-1:0] map_col(input logic [ADDR_BITS-1:0] a, input int map);
+    case (map)
+      MAP_RCB: return a[BANK_BITS +: COL_BITS];
+      default: return a[COL_BITS-1:0];
+    endcase
   endfunction
+  /* verilator lint_on UNUSEDSIGNAL */
 
 endpackage : dram_pkg

@@ -425,7 +425,3 @@ Makefile                       sim, sim-rand, regress, cov, lint, sim-cocotb, cl
 ## 관련 프로젝트
 
 [High-Speed Link Lite](https://github.com/yhkwon-git/High_Speed_Link_Lite): HBM base die 디지털 링크 1채널 슬라이스. 그 프로젝트의 메모리 컨트롤러는 큐 head만 발행하는 in-order 구조이고, 이 저장소는 그다음 단계인 뱅크 병렬 처리, tag 기반 응답 재정렬, refresh 스케줄링을 구현했다.
-
-## License
-
-MIT. [LICENSE](LICENSE)를 본다.

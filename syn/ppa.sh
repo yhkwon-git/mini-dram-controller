@@ -9,8 +9,8 @@ set -euo pipefail
 OUT=${OUT:-build/ppa}
 SV2V=${SV2V:-sv2v}
 LIB=${LIB:-$HOME/src/OpenSTA/examples/nangate45_typ.lib.gz}
-SRCS=(rtl/dram_pkg.sv rtl/mc_queue.sv rtl/mc_bank.sv rtl/mc_chan.sv rtl/mc_refresh.sv
-      rtl/mc_sched.sv rtl/mc_resp.sv rtl/mem_ctrl.sv)
+# SRCS="..." overrides the file list, e.g. for an older commit with a different layout
+read -r -a SRCS <<< "${SRCS:-rtl/dram_pkg.sv rtl/mc_queue.sv rtl/mc_bank.sv rtl/mc_chan.sv rtl/mc_refresh.sv rtl/mc_sched.sv rtl/mc_resp.sv rtl/mem_ctrl.sv}"
 
 mkdir -p "$OUT"
 case "$LIB" in

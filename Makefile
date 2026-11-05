@@ -2,7 +2,7 @@
 # Needs Verilator >= 5.0 (--binary, --timing). On Windows, run make inside WSL:
 #   wsl make sim          (from the repository folder)
 #
-#   make sim              # Verilator build + run tb/tb_mem_ctrl.sv
+#   make sim              # Verilator build + run tb/tb_mem_ctrl.sv with the bound checkers
 #   make sim WAVES=1      # same, and write tb_mem_ctrl.vcd
 #   make lint             # Verilator --lint-only on the RTL
 #   make sim-cocotb       # optional cocotb smoke test (cocotb >= 2.0)
@@ -19,11 +19,13 @@ RTL_SRCS := \
   rtl/mem_ctrl.sv \
   rtl/mem_ctrl_top.sv
 
-TB_SV := tb/tb_mem_ctrl.sv
+# Checkers bound into the RTL (tb/mc_bind.sv); every testbench build includes them
+TB_CHECK := tb/dram_timing_checker.sv tb/host_if_checker.sv tb/mc_bind.sv
+TB_SV    := tb/tb_mem_ctrl.sv
 
 VERILATOR ?= verilator
 PYTHON    ?= python3
-VERILATOR_FLAGS := -Wall --timing --sv --binary -Wno-fatal
+VERILATOR_FLAGS := -Wall --timing --sv --binary -Wno-fatal --assert
 VERILATOR_FLAGS += -Irtl --Mdir $(BUILD_DIR)
 ifeq ($(WAVES),1)
   VERILATOR_FLAGS += --trace +define+WAVES
@@ -52,7 +54,7 @@ lint:
 
 sim: check-verilator
 	$(VERILATOR) $(VERILATOR_FLAGS) --top-module $(TOP_TB) \
-	  $(RTL_SRCS) $(TB_SV) -o sim_mem_ctrl
+	  $(RTL_SRCS) $(TB_CHECK) $(TB_SV) -o sim_mem_ctrl
 	$(BUILD_DIR)/sim_mem_ctrl
 
 check-verilator:

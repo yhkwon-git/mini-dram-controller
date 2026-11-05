@@ -1,4 +1,6 @@
 // Directed tests: hit/miss/multi-bank, 4-bank burst, response back-pressure.
+// The checkers bound by tb/mc_bind.sv watch the DRAM command pins and the host
+// handshake during every scenario; their results are part of the verdict.
 // A failed check prints "[TB] ERROR ..." and the run continues; the end of the
 // run prints the summary and calls $fatal, so any simulator exits non-zero.
 // ($error would stop Verilator at the first failure, before the summary, and
@@ -310,6 +312,19 @@ module tb_mem_ctrl
     // Model observability outputs must not be X/Z at the end of the run
     if ($isunknown({dram_page_hit, dram_bank_open})) begin
       $display("[TB] ERROR X/Z on model observability outputs");
+      errs++;
+    end
+
+    // Bound checkers (tb/mc_bind.sv)
+    dut.u_dram.u_tchk.report();
+    dut.u_hchk.report();
+    if (dut.u_dram.u_tchk.violations != 0) begin
+      $display("[TB] ERROR DRAM timing/protocol violations=%0d", dut.u_dram.u_tchk.violations);
+      errs++;
+    end
+    if (dut.u_hchk.dut_violations + dut.u_hchk.host_violations != 0) begin
+      $display("[TB] ERROR host handshake violations=%0d",
+               dut.u_hchk.dut_violations + dut.u_hchk.host_violations);
       errs++;
     end
 

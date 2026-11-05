@@ -10,7 +10,7 @@ Spec → RTL → Verification → Performance / PPA
 [![Synth](https://img.shields.io/badge/Synth%20%2F%20STA-Yosys%200.52%20%C2%B7%20OpenSTA%203.1-8250df)](#ppa)
 [![License](https://img.shields.io/badge/License-MIT-lightgrey)](LICENSE)
 
-**[📄 포트폴리오 PDF (21쪽)](portfolio-deck/MiniDramController_Portfolio.pdf)** · [PPTX](portfolio-deck/MiniDramController_Portfolio.pptx) · [스펙 문서](docs/spec.md)
+**[📄 포트폴리오 PDF (21쪽)](portfolio-deck/MiniDramController_Portfolio.pdf)** · [PPTX](portfolio-deck/MiniDramController_Portfolio.pptx) · [스펙 문서](docs/spec.md) · [검증 문서](docs/verification.md)
 
 <a href="portfolio-deck/MiniDramController_Portfolio.pdf"><img src="portfolio-deck/cover.png" width="760" alt="포트폴리오 표지. 클릭하면 PDF가 열립니다"></a>
 
@@ -20,13 +20,13 @@ SK hynix HBM Digital Design (RTL Design) 지원 · 권용현
 
 ## 한눈에 보기
 
-| 4-bank burst | 회귀 | 타이밍 규칙 | 코드 커버리지 |
+| 4-bank burst | 랜덤 회귀 | DRAM 규칙 위반 | 코드 커버리지 |
 | :---: | :---: | :---: | :---: |
-| **17 cycles (2.06×)** | **5 / 5 PASS** | **7종 위반 0** | **Line 94.3%**<br>**Branch 91.9%** |
-| 단일 FSM(v0)은 35 cycles | hit · miss · multi-bank<br>burst · back-pressure | tRCD · tRP · tRAS · tRC<br>tWR · tCL · tRFC | `mem_ctrl` 기준<br>Toggle 51.2% |
+| **17 cycles (2.06×)** | **300 / 300 PASS** | **0** | **Line 97.1%**<br>**Toggle 95.9%** |
+| 단일 FSM(v0)은 35 cycles | 150만 요청 · 패턴 6종<br>directed 5 / 5 PASS | 타이밍 7종 · 프로토콜 5종<br>refresh 2종은 알려진 gap | `mem_ctrl`, directed + 랜덤<br>Branch 94.4% |
 
 > [!NOTE]
-> 커버리지와 PPA 수치, PDF의 파형은 commit `6049e5a`를 다시 실행해 측정했다. 그 뒤 `fa08330`(태그 wrap-around 수정)과 `7e2d4b5`(회귀 TB 보강)가 PDF 19쪽의 항목 A, C를 반영했다. 회귀, 타이밍 규칙, latency 수치는 현재 HEAD에서 다시 확인했다(Verilator 5.052).
+> 회귀, 타이밍 규칙, 커버리지, latency 수치는 commit `2eabd33` 기준이다(Verilator 5.052). RTL은 `47ec4ea` 이후 바뀌지 않았다. PPA 수치와 PDF의 파형은 commit `6049e5a`를 다시 실행해 측정했고, 그 뒤 `fa08330`(태그 wrap-around 수정)과 `7e2d4b5`(회귀 TB 보강)가 PDF 19쪽의 항목 A, C를 반영했다. PDF의 커버리지 수치는 랜덤 회귀를 넣기 전 값이다.
 
 ## 개요
 
@@ -144,9 +144,61 @@ REF 하나는 `tRFC + 2` = 14사이클과 그 앞의 drain 동안 요청을 막�
 
 ## 검증
 
-### 회귀: `make sim`
+모든 시뮬레이션을 bind 체커 두 개가 지켜본다. 체커는 RTL과 TB를 고치지 않고 붙는다. 그 위에서 directed 시나리오 5개와, UVM 구조를 본뜬 랜덤 TB가 돈다. 구조, 규칙 전체, 기능 bin 목록은 [검증 문서](docs/verification.md)에 있다.
 
-[`tb/tb_mem_ctrl.sv`](tb/tb_mem_ctrl.sv)의 directed 시나리오 5개가 한 번에 돈다. 데이터 비교가 틀리거나 모델 `access_err`, `rsp_err`가 한 번이라도 나오면 실패다. 실패한 체크는 모두 `[TB] ERROR`로 찍고 끝까지 진행한 뒤, 요약을 출력하고 `$fatal`로 0이 아닌 코드로 끝난다.
+| 구성 | 파일 | 하는 일 |
+| --- | --- | --- |
+| DRAM 타이밍 · 프로토콜 체커 | [`dram_timing_checker.sv`](tb/dram_timing_checker.sv) | `dram_model`의 명령 핀만 보고 open row와 명령 시각을 따로 재구성해 타이밍 7종과 프로토콜 5종을 검사한다. `mem_ctrl` 내부는 읽지 않는다 |
+| 호스트 valid/ready SVA | [`host_if_checker.sv`](tb/host_if_checker.sv) | concurrent assertion 4개(요청 유지, 응답 유지, X/Z, `rsp_err`)와 cover 5개 |
+| 랜덤 TB | [`mc_tb_pkg.sv`](tb/mc_tb_pkg.sv) · [`tb_mem_ctrl_rand.sv`](tb/tb_mem_ctrl_rand.sv) | sequence → driver → DUT → monitor → scoreboard(참조 메모리). back-pressure responder, 기능 bin 17개, seed 재현 |
+| Directed TB | [`tb_mem_ctrl.sv`](tb/tb_mem_ctrl.sv) | 시나리오 5개 |
+
+### 랜덤 회귀: `make regress`
+
+트래픽 패턴 6개 × seed 50개 × 요청 5,000건으로 모두 300회, 150만 요청이다(commit `2eabd33`, 약 70초).
+
+| 항목 | 결과 |
+| --- | --- |
+| PASS | **300 / 300** |
+| 데이터 불일치 · 타이밍 위반 · 프로토콜 위반 | **0 · 0 · 0** |
+| 기능 bin | **17 / 17** |
+| 재정렬 (뒤에 온 요청의 RD/WR가 먼저 나감) | 332,014회. 응답 순서와 데이터는 모두 일치 |
+
+<p align="center"><img src="docs/images/regress_baseline.png" width="820" alt="패턴별 row hit rate, 데이터 버스 사용률, latency 평균과 p99, REF 평균 간격. 수치는 아래 표와 같다"></p>
+
+| 패턴 | row hit | 데이터 버스 사용률 | latency 평균 / p99 | REF 간격 평균 | 최대 refresh debt |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| seq | 65.0% | 12.3% | 36.0 / 76.3 | 109.1 | 271 |
+| rowhit | 84.4% | 29.1% | 31.6 / 85.0 | 87.9 | 76 |
+| mixed | 14.9% | 13.8% | 43.1 / 86.9 | 120.2 | 281 |
+| rand | 3.1% | 17.4% | 42.4 / 88.9 | 113.7 | 202 |
+| hotbank | 1.8% | 8.7% | 50.2 / 90.7 | 133.6 | 478 |
+| stride | 0.9% | 7.5% | 51.9 / 90.8 | 135.0 | 549 |
+
+<sub>seed 50개 평균이고, 최대 refresh debt만 최댓값이다. latency는 요청 수락에서 응답까지의 사이클 수, 데이터 버스 사용률은 RD 데이터나 WR 데이터가 오간 사이클의 비율이다. 패턴 정의는 [검증 문서](docs/verification.md#트래픽-패턴)에 있다.</sub>
+
+랜덤 회귀가 드러낸 것은 세 가지다.
+
+- **Refresh가 밀린다.**
+  - 부하가 걸리면 REF 간격이 tREFI(64)의 1.4–2.1배가 되고, 아직 내지 못한 REF가 최대 549개까지 쌓인다.
+  - directed 시나리오에서는 평균 84사이클, debt 3이라 이 규모가 보이지 않았다.
+  - 원인은 두 가지다. drain-then-REF는 큐가 빌 때까지 REF를 미룬다. 또 `refi_cnt`는 REF가 끝난 뒤에야 다시 장전된다.
+  - 실제 DRAM이라면 retention 위반이다. 체커가 이를 따로 세고(waived) [다음 단계](#다음-단계)의 첫 항목으로 올렸다.
+- **데이터 버스가 비어 있다.**
+  - 사용률이 7.5–29.1%에 그친다.
+  - 사이클당 명령 1개와 read in-flight 1개가 상한을 정한다.
+  - 이 값이 읽기 파이프라이닝과 행/열 명령 버스 분리의 기준선이다.
+- **row hit는 트래픽이 정한다.** open-page의 이득은 지역성이 있는 `seq` · `rowhit`에서만 나온다.
+
+### Directed 회귀: `make sim`
+
+[`tb/tb_mem_ctrl.sv`](tb/tb_mem_ctrl.sv)의 시나리오 5개가 한 번에 돈다. 아래 중 하나라도 나오면 실패다.
+
+- 데이터 비교가 틀림
+- 모델 `access_err`나 `rsp_err`가 한 번이라도 나옴
+- 체커가 위반을 잡음
+
+실패한 체크는 모두 `[TB] ERROR`로 찍고 끝까지 진행한다. 끝에 요약을 출력하고 `$fatal`로 0이 아닌 코드를 낸다.
 
 | # | 시나리오 | 확인 내용 |
 | --- | --- | --- |
@@ -157,7 +209,7 @@ REF 하나는 `tRFC + 2` = 14사이클과 그 앞의 drain 동안 요청을 막�
 | 5 | 응답 back-pressure | `rsp_ready`를 150사이클 내린 채 read 20건(tag 16개 초과): 20/20 순서와 데이터 일치, REF ≥ 1회 |
 
 <details>
-<summary>회귀 로그 (HEAD, Verilator 5.052)</summary>
+<summary>회귀 로그 (commit <code>2eabd33</code>, Verilator 5.052)</summary>
 
 ```text
 [TB] === SCENARIO 1: page hit WR→RD ===
@@ -179,6 +231,25 @@ REF 하나는 `tRFC + 2` = 14사이클과 그 앞의 drain 동안 요청을 막�
 [TB] back-pressure OK (20/20 in order, 3 REF during the test)
 [TB] access_err count=0 OK
 [TB] rsp_err count=0 OK
+[TCHK] rule                          spec   min  checked  violations
+[TCHK] tRCD  ACT -> RD/WR               3     4       58           0
+[TCHK] tRP   PRE -> ACT/REF             3     4       24           0
+[TCHK] tRAS  ACT -> PRE                 6    10       24           0
+[TCHK] tRC   ACT -> ACT                 9    14       50           0
+[TCHK] tWR   WR -> PRE                  2    14       11           0
+[TCHK] tRFC  REF -> next command       12    16        9           0
+[TCHK] tCL   RD -> data (exact)         3     3       30           0
+[TCHK] ACT to an open bank                                       0
+[TCHK] RD/WR to a closed bank                                    0
+[TCHK] RD/WR to a row not open                                   0
+[TCHK] data_valid with no RD                                     0
+[TCHK] RD whose data never came                                  0
+[TCHK] REF while a row is open                                  30  waived (known v1 gap)
+[TCHK] refresh debt > 8 tREFI                                    0
+[TCHK] commands: ACT 54, RD 30, WR 28, PRE 24, REF 10
+[TCHK] REF interval avg 84.0, max 104 edges (tREFI 64); peak refresh debt 3
+[TCHK] PASS: 0 violation(s), 30 waived
+[HCHK] PASS: controller violations 0, host violations 0
 [TB] PASS — hit/miss/multi-bank/burst/back-pressure OK
 ```
 
@@ -186,36 +257,41 @@ REF 하나는 `tRFC + 2` = 14사이클과 그 앞의 drain 동안 요청을 막�
 
 ### 타이밍 규칙 검사
 
-`dram_model`은 상태와 데이터만 모델링하고 명령 간격은 검사하지 않는다. 그래서 수정하지 않은 `tb_mem_ctrl`을 모니터로 감싸, `make sim`의 다섯 시나리오 전체(리셋 후 834사이클)에서 뱅크별 명령 간격을 쟀다. 간격은 두 이벤트를 샘플한 클럭 엣지 사이의 사이클 수다.
+`dram_model`은 상태와 데이터만 모델링하고 명령 간격은 검사하지 않는다. 그래서 명령 핀을 보는 체커를 따로 두었다. 아래는 `make sim`(리셋 후 834사이클)의 결과이고, 랜덤 회귀 300회에서도 위반은 0이다. 간격은 두 이벤트를 샘플한 클럭 엣지 사이의 사이클 수다.
 
 | 규칙 | 스펙 | 측정 최소 | 검사한 간격 | 위반 |
 | --- | ---: | ---: | ---: | ---: |
 | tRCD (ACT → RD/WR) | 3 | 4 | 58 | 0 |
-| tRP (PRE → ACT) | 3 | 4 | 24 | 0 |
+| tRP (PRE → ACT/REF) | 3 | 4 | 24 | 0 |
 | tRAS (ACT → PRE) | 6 | 10 | 24 | 0 |
 | tRC (ACT → ACT) | 9 | 14 | 50 | 0 |
 | tWR (WR → PRE) | 2 | 14 | 11 | 0 |
-| tCL (RD → `data_valid`) | 2 | 3 | 30 | 0 |
 | tRFC (REF → 다음 명령) | 12 | 16 | 9 | 0 |
+| tCL (RD → `data_valid`) | 2 | 3 | 30 | 0 |
 
-tRCD와 tRP가 스펙보다 1 긴 것은 위의 wait → issue handoff 때문이다. tCL이 1 긴 것은 모델이 RD를 받은 엣지에서 tCL 엣지 뒤에 `data_valid`를 레지스터로 올리고, 그 값이 다음 엣지에 샘플되기 때문이다. 이 모니터는 아직 저장소에 넣지 않았다. TB 안의 assertion으로 옮기는 일이 다음 단계에 있다.
+측정 최소가 스펙보다 1 긴 규칙이 셋 있다.
+- tRCD, tRP: 위의 wait → issue handoff 때문이다.
+- tCL: 모델이 RD를 받은 엣지에서 tCL 엣지 뒤에 `data_valid`를 레지스터로 올리고, 그 값이 다음 엣지에 샘플되기 때문이다. 그래서 체커는 tCL을 "정확히 tCL + 1"로 검사한다.
+
+프로토콜 5종(열린 뱅크에 ACT, 닫힌 뱅크나 다른 row에 RD/WR, RD 없는 `data_valid`, 데이터가 오지 않은 RD)도 위반 0이다. REF 때 열린 row는 directed에서 30건 나온다. 알려진 문제라 waived로 따로 센다.
 
 ### 코드 커버리지와 남은 구멍
 
 | 모듈 | Line | Branch | Toggle |
 | --- | ---: | ---: | ---: |
-| `mem_ctrl` | 94.3% | 91.9% | 51.2% |
-| `dram_model` | 100.0% | 83.3% | 75.7% |
-| 전체 | 95.8% | 90.2% | 63.7% |
+| `mem_ctrl` | 94.1% → **97.1%** | 91.7% → **94.4%** | 61.8% → **95.9%** |
+| `dram_model` | 100.0% → **100.0%** | 83.3% → **83.3%** | 83.3% → **99.0%** |
+| RTL 전체 | 95.7% → **97.9%** | 90.0% → **92.2%** | 71.0% → **97.1%** |
 
-<sub>commit `6049e5a`, Verilator line/toggle coverage 빌드. 시나리오 5가 더해지기 전의 측정이다.</sub>
+<sub>commit `2eabd33`, `make cov`. 화살표 왼쪽은 directed만, 오른쪽은 랜덤 18회(패턴 6 × seed 3 × 5,000건)를 더한 값이다. 두 TB의 결과를 소스 지점 기준으로 합쳤다.</sub>
 
-아직 닫지 못한 구멍은 [`docs/coverage.md`](docs/coverage.md)에 정리했다.
+남은 구멍은 다음과 같다.
 
-- 시나리오 5가 큐 4슬롯을 모두 채우지만, 오래된 엔트리를 앞질러 dispatch하는 경우(out-of-order dispatch)는 일어나지 않는다. 시나리오 1–4는 호스트 task가 응답을 기다려 점유가 1 이하다
-- 열린 row로 바로 가는 write-hit 경로에 도달하지 않는다
-- `access_err` 경로(PRE 누락, 잘못된 row)를 일부러 일으키는 negative test가 없다
-- 네 뱅크가 모두 바쁠 때 REF가 걸리는 경우, random traffic, coverage bin이 없다
+- `mem_ctrl.sv:318`의 PRE_WAIT → IDLE. v1은 다른 row를 열 때만 PRE를 내므로 쓰이지 않는 경로다. close-page 정책을 넣으면 쓰인다
+- `mem_ctrl.sv:290` · `298` · `302`는 파라미터 상수 조건이고, `310`은 `case` default라 구조상 도달하지 않는다
+- `dram_model`의 오류 경로 3곳(닫힌 row 읽기, 열린 뱅크에 다른 row ACT, 닫힌 row에 WR). 컨트롤러가 그런 명령을 내지 않았다는 뜻이고, 모델을 직접 모는 negative test가 남았다
+
+이전에 남겼던 out-of-order dispatch, write-hit 경로, 타이밍 assertion, random traffic 구멍은 랜덤 회귀로 닫았다([커버리지 노트](docs/coverage.md)).
 
 ## 디버그: 응답 back-pressure에서 태그 wrap-around
 
@@ -276,14 +352,19 @@ sv2v → Yosys 0.52 → Nangate45 typical (OpenSTA 예제 라이브러리) → O
 git clone https://github.com/yhkwon-git/mini-dram-controller.git
 cd mini-dram-controller
 make check-tools     # verilator, python3, cocotb 확인
-make sim             # 시나리오 5개 → [TB] PASS
+make sim             # directed 시나리오 5개 + bind 체커 → [TB] PASS
+make sim-rand        # 랜덤 1회 (PATTERN=mixed SEED=1 N=2000)
+make regress         # 랜덤 회귀: 패턴 6 × SEEDS × N (기본 20 × 2,000)
+make cov             # line / branch / toggle 커버리지, directed + 랜덤
 make sim WAVES=1     # tb_mem_ctrl.vcd도 기록
 make lint            # Verilator lint-only
 ```
 
 - **Windows**: WSL에 Verilator를 설치하고 저장소 폴더에서 `wsl make sim`
 - **cocotb (선택, ≥ 2.0)**: `pip install cocotb && make sim-cocotb`. 리셋 직후 idle 상태만 보는 smoke test다
-- 빌드 결과는 `obj_dir/`에 생기며 git에서 제외된다
+- **그래프**: `python tools/regress_report.py build/regress/regress.csv --plots docs/images` (matplotlib 필요)
+- 실패한 랜덤 실행은 `build/regress/<패턴>_seed<번호>.log`에 로그가 남고, 같은 `+PATTERN` · `+SEED`로 그대로 재현된다
+- 빌드 결과는 `obj_dir*/`, `build/`에 생기며 git에서 제외된다
 
 ## 저장소 구조
 
@@ -296,15 +377,27 @@ rtl/
   mem_ctrl_top.sv              세 블록 연결
 tb/
   tb_mem_ctrl.sv               directed 시나리오 5개 (make sim)
+  tb_mem_ctrl_rand.sv          랜덤 TB top, DRAM 핀 모니터 (make sim-rand, make regress)
+  mc_tb_pkg.sv                 sequence · driver · responder · monitor · scoreboard · coverage · env
+  mc_host_if.sv                호스트 포트 interface
+  dram_timing_checker.sv       DRAM 타이밍 · 프로토콜 체커 (bind)
+  host_if_checker.sv           호스트 valid/ready SVA (bind)
+  mc_bind.sv                   두 체커를 RTL에 bind
+  run_regress.sh               패턴 × seed 회귀 실행
   test_mem_ctrl.py             cocotb smoke test
   cocotb_runner.py             cocotb 빌드와 실행 (make sim-cocotb)
+tools/
+  regress_report.py            회귀 CSV 요약 표, --plots로 그래프
+  plot_regress.py              패턴별 기준선 그래프
+  cov_summary.py               커버리지 병합, 모듈별 표, --holes
 docs/
   spec.md                      주소 맵, 타이밍, 명령, 호스트 IF, 스케줄러, refresh
+  verification.md              검증 구조, 체커 규칙, 회귀 · 커버리지 결과
   scheduler-throughput.md      latency, throughput, trade-off
-  coverage.md                  커버리지와 남은 gap
-  images/                      README 파형 그림
+  coverage.md                  시나리오별 확인 항목, 닫힌 구멍과 남은 구멍
+  images/                      README 파형과 그래프
 portfolio-deck/                포트폴리오 PDF, PPTX
-Makefile                       sim, lint, sim-cocotb, clean
+Makefile                       sim, sim-rand, regress, cov, lint, sim-cocotb, clean
 ```
 
 ## 문서
@@ -312,19 +405,22 @@ Makefile                       sim, lint, sim-cocotb, clean
 | 문서 | 내용 |
 | --- | --- |
 | [스펙](docs/spec.md) | 주소 맵, 타이밍 파라미터, 명령 집합, 호스트 인터페이스 규칙, 스케줄러와 refresh 정책, 구현 상태 |
+| [검증](docs/verification.md) | bind 체커 규칙, 랜덤 TB 구조, 트래픽 패턴, 회귀 · 기능 커버리지 · 코드 커버리지 결과 |
 | [스케줄러 latency · throughput](docs/scheduler-throughput.md) | 경로별 latency (v0 대비), burst throughput, refresh 비용, trade-off, 다음 개선점 |
-| [커버리지](docs/coverage.md) | 시나리오별 확인 항목, TB/RTL 내부 체크, 아직 자동화하지 못한 gap |
+| [커버리지](docs/coverage.md) | 시나리오별 확인 항목, 랜덤 회귀로 닫힌 구멍, 남은 구멍 |
 | [포트폴리오 PDF](portfolio-deck/MiniDramController_Portfolio.pdf) | 아키텍처 비교, RTL 구현, 파형, 디버그, PPA를 21쪽으로 정리 |
 
 ## 다음 단계
 
-- [ ] tREFI 카운터를 REF와 무관하게 돌리고 postpone 한도를 둬서 평균 REF 간격을 tREFI로 맞추기. REF 전에 PREA 발행
+- [ ] tREFI 카운터를 REF와 무관하게 돌리고 postpone 한도를 둬서 평균 REF 간격을 tREFI로 맞추기. REF 전에 PREA 발행 (랜덤 회귀에서 refresh debt 최대 549)
 - [ ] `dram_busy` 입력 대신 컨트롤러가 tRFC를 직접 세기 (실제 DRAM에는 busy 신호가 없다)
-- [ ] 네 뱅크가 바쁠 때 REF가 걸리는 회귀 추가
+- [ ] 읽기 파이프라이닝과 행/열 명령 버스 분리로 데이터 버스 사용률(현재 7.5–29.1%) 올리기
+- [ ] tCCD · tRRD · tFAW · tWTR를 스펙과 체커에 추가
 - [ ] 대기 상태가 끝나는 사이클에 바로 명령 발행 (handoff −1 cycle)
-- [ ] 뱅크를 섞은 non-blocking 호스트로 out-of-order dispatch와 write-hit 경로 검증
-- [ ] 명령 간격 모니터를 TB 안의 assertion으로 옮기고 `access_err` negative test 추가
+- [ ] `dram_model` 오류 경로(`access_err`) negative test, 네 뱅크가 모두 바쁠 때 REF가 걸리는 경우를 bin으로 확인
 - [ ] 응답 버퍼와 `b_timer`를 줄인 뒤 면적 재측정
+- [x] 명령 간격 모니터를 bind 체커로 저장소에 넣기 ([`tb/dram_timing_checker.sv`](tb/dram_timing_checker.sv))
+- [x] non-blocking 랜덤 호스트로 out-of-order dispatch와 write-hit 경로 검증 (재정렬 332,014회, write-hit 212,161회)
 
 ## 관련 프로젝트
 

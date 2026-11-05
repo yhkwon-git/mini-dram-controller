@@ -137,7 +137,7 @@ REF 하나는 `tRFC + 2` = 14사이클과 그 앞의 drain 동안 요청을 막�
 | 선택 | 이점 | 대가 |
 | --- | --- | --- |
 | Open-page (auto-PRE 없음) | Hit 재사용, 뱅크별 지역성 | Row conflict마다 PRE + ACT |
-| Drain-then-REF | 단순하고 예측 가능 | Latency 버블. REF가 열린 row를 모두 닫는다 |
+| Drain-then-REF | 단순하고 예측 가능 | Latency 버블. `refi_cnt`를 REF가 끝난 뒤 다시 장전해 REF 간격이 tREFI + drain + tRFC로 늘어난다. REF 전에 PREA를 내지 않고 모델이 열린 row를 닫는다 |
 | 깊이 4 큐 + 뱅크 엔진 | 뱅크별 대기를 가리고 다중 outstanding 요청을 받는다 | 단독 요청 +2–3 cycles. 명령 슬롯 1개, read pipe 1개 |
 | Tag 기반 in-order 응답 | 호스트 계약이 단순하다 | 먼저 끝난 응답이 16 × 32b 버퍼에서 기다린다(FF의 약 절반) |
 | Shadow open-row | 모델을 들여다보지 않고 스케줄한다 | `dram_model`과 상태를 맞춰야 한다 |
@@ -318,6 +318,8 @@ Makefile                       sim, lint, sim-cocotb, clean
 
 ## 다음 단계
 
+- [ ] tREFI 카운터를 REF와 무관하게 돌리고 postpone 한도를 둬서 평균 REF 간격을 tREFI로 맞추기. REF 전에 PREA 발행
+- [ ] `dram_busy` 입력 대신 컨트롤러가 tRFC를 직접 세기 (실제 DRAM에는 busy 신호가 없다)
 - [ ] 네 뱅크가 바쁠 때 REF가 걸리는 회귀 추가
 - [ ] 대기 상태가 끝나는 사이클에 바로 명령 발행 (handoff −1 cycle)
 - [ ] 뱅크를 섞은 non-blocking 호스트로 out-of-order dispatch와 write-hit 경로 검증

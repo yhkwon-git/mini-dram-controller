@@ -10,7 +10,7 @@ Spec → RTL → Verification → Performance / PPA
 [![Synth](https://img.shields.io/badge/Synth%20%2F%20STA-Yosys%200.52%20%C2%B7%20OpenSTA%203.1-8250df)](#ppa)
 [![License](https://img.shields.io/badge/License-MIT-lightgrey)](LICENSE)
 
-**[📄 포트폴리오 PDF (21쪽)](portfolio-deck/MiniDramController_Portfolio.pdf)** · [PPTX](portfolio-deck/MiniDramController_Portfolio.pptx) · [스펙 문서](docs/spec.md) · [검증 문서](docs/verification.md)
+**[📄 포트폴리오 PDF (27쪽)](portfolio-deck/MiniDramController_Portfolio.pdf)** · [PPTX](portfolio-deck/MiniDramController_Portfolio.pptx) · [스펙 문서](docs/spec.md) · [검증 문서](docs/verification.md)
 
 <a href="portfolio-deck/MiniDramController_Portfolio.pdf"><img src="portfolio-deck/cover.png" width="760" alt="포트폴리오 표지. 클릭하면 PDF가 열립니다"></a>
 
@@ -26,7 +26,7 @@ SK hynix HBM Digital Design (RTL Design) 지원 · 권용현
 | 데이터 버스, 읽기만 · 쓰기만<br>같은 장치의 v3 방식 63.3% (+27%) | 600만 요청 · 패턴 6 · 빌드 16<br>규칙 위반 0 · 기능 bin 32/32 | 뱅크별 ACT 카운터와 RFM<br>한도 도달 131,879회에도 위반 0 | Nangate45 reg2reg 2.831 ns<br>v3 337 MHz · 면적 18,912 µm² |
 
 > [!NOTE]
-> 수치는 모두 commit `ab9d522` 기준이다(Verilator 5.052, Yosys 0.52, OpenSTA 3.1). v3 비교값은 commit `1b0943a`, v2는 `c1b8248`, v1은 `2eabd33`을 같은 TB로 돌려 쟀다. v4부터 DRAM 모델에 뱅크 그룹이 생겨, 같은 장치에서의 비교는 v4를 v3 방식으로 빌드한 값(`bus1_refab`)으로 한다. PDF와 그 안의 파형은 v1(commit `6049e5a`) 기준이다.
+> 수치는 모두 commit `ab9d522` 기준이다(Verilator 5.052, Yosys 0.52, OpenSTA 3.1). v3 비교값은 commit `1b0943a`, v2는 `c1b8248`, v1은 `2eabd33`을 같은 TB로 돌려 쟀다. v4부터 DRAM 모델에 뱅크 그룹이 생겨, 같은 장치에서의 비교는 v4를 v3 방식으로 빌드한 값(`bus1_refab`)으로 한다. PDF는 2쪽(v0 → v4 요약)과 22–26쪽(v2 – v4)이 이 수치를 쓰고, 3–21쪽의 파형과 수치는 v1(commit `6049e5a`) 기준이다.
 
 ## 개요
 
@@ -408,7 +408,7 @@ flowchart TB
 
 <sub>v1, `rsp_ready`가 풀리는 구간. 위 세 줄은 수정 전, 아래 두 줄은 수정 후다. 수정 전에는 tag 4 자리에 17번째 read의 데이터(`10`)가 나가고 16건 뒤 `rsp_valid`가 내려간다. 수정 후에는 `00`부터 `13`까지 20건이 순서대로 나간다.</sub>
 
-같은 재검증에서 나온 나머지 항목은 PDF 19쪽에 정리했다. 병렬성 체크(C)는 `7e2d4b5`에서, handoff +1(B)은 v2에서, out-of-order dispatch와 write-hit 미검증(D)은 랜덤 회귀에서 닫았다. 모델 오류 경로(E)는 남아 있다.
+같은 재검증에서 나온 나머지 항목은 PDF 20쪽에 정리했다. 병렬성 체크(C)는 `7e2d4b5`에서, handoff +1(B)은 v2에서, out-of-order dispatch와 write-hit 미검증(D)은 랜덤 회귀에서 닫았다. 모델 오류 경로(E)는 남아 있다.
 
 ## 디버그: 포워딩 판정이 한 사이클 어긋남 (v3)
 
@@ -527,7 +527,7 @@ docs/
   coverage.md                  시나리오별 확인 항목, 닫힌 구멍과 남은 구멍
   data/                        버전 비교 그래프의 기준값 (v1, v2, v3)
   images/                      README 그래프와 파형
-portfolio-deck/                포트폴리오 PDF, PPTX (v1 기준)
+portfolio-deck/                포트폴리오 PDF, PPTX (v0 → v4 요약, v1 상세, v2 – v4)
 Makefile                       sim, sim-rand, regress, cov, ppa, lint, sim-cocotb, clean
 ```
 
@@ -540,7 +540,7 @@ Makefile                       sim, sim-rand, regress, cov, ppa, lint, sim-cocot
 | [스케줄러 latency · throughput](docs/scheduler-throughput.md) | v0 – v4 경로별 latency, 처리량, 두 버스 · refresh 방식 · 정책 · 매핑 비교, trade-off |
 | [분석](docs/analysis.md) | 트래픽 7종 × 빌드 16개 × 두 부하, refresh · 버스 · 매핑 · 큐 깊이 · 정책별 성능과 면적 · 타이밍, 권장 설정 |
 | [커버리지](docs/coverage.md) | 시나리오별 확인 항목, 랜덤 회귀로 닫힌 구멍, 남은 구멍 |
-| [포트폴리오 PDF](portfolio-deck/MiniDramController_Portfolio.pdf) | v1의 아키텍처 비교, RTL 구현, 파형, 디버그, PPA를 21쪽으로 정리 |
+| [포트폴리오 PDF](portfolio-deck/MiniDramController_Portfolio.pdf) | 27쪽. v0 → v4 요약(2쪽), v1의 아키텍처 · RTL · 파형 · 디버그 · PPA(3–21쪽), v2 – v4의 구조 · 검증 · 성능 · 트래픽 분석 · PPA(22–26쪽) |
 
 ## 다음 단계
 

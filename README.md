@@ -560,4 +560,4 @@ Makefile                       sim, sim-rand, regress, cov, ppa, lint, sim-cocot
 
 ## 관련 프로젝트
 
-[High-Speed Link Lite](https://github.com/yhkwon-git/High_Speed_Link_Lite): 컨트롤러를 base die에 두는 custom HBM 구조를 전제로 한 HBM base die 디지털 1채널 슬라이스. 이 저장소의 v4 컨트롤러 RTL(`44a0bb3`)을 파일 그대로 가져가, DFI 형태 인터페이스로 디지털 PHY(행 · 열 CA 핀, 1.6 GHz beat와 WDQS, RDQS 캡처) · DFT와 묶었다. 컨트롤러가 DRAM 쪽에 고정 지연(RL, WL)만 약속하므로 PHY 앞에 그대로 붙는다.
+[High-Speed Link Lite](https://github.com/yhkwon-git/High_Speed_Link_Lite): 컨트롤러를 base die에 두는 custom HBM 구조를 전제로 한 HBM base die 디지털 1채널 슬라이스. 이 저장소의 v4 컨트롤러 RTL(`44a0bb3`)을 파일 그대로 가져가, DFI 형태 인터페이스로 디지털 PHY(행 · 열 CA 핀, 1.6 GHz beat와 WDQS, RDQS 캡처, SECDED ECC) · DFT · DFD(레인 BIST, March MBIST, BIRA와 fuse repair, trace buffer · MISR, IEEE 1500 방식 시험 포트)와 묶었다. 컨트롤러가 DRAM 쪽에 고정 지연(RL, WL)만 약속하므로 PHY 앞에 그대로 붙는다.

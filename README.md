@@ -45,6 +45,7 @@ DRAM 접근 지연은 뱅크 상태에 따라 크게 달라진다. 같은 bank 0
 - **범위**: `host_if` → `mem_ctrl`(`mc_queue` ×2, `mc_xage`, `mc_wdrain`, `mc_sched`, `mc_bank` ×4, `mc_chan`, `mc_refresh`, `mc_resp`) → `dram_model`(뱅크 그룹 2 × 뱅크 2). 단일 클럭 동기 설계, 비동기 리셋
 - **타이밍**: 자체 축소 모델(사이클 단위). JEDEC 값이 아니며, 구조와 규칙을 검증하기 위한 값이다
 - **범위 밖**: 실제 PHY, multi-rank, ECC, 사인오프 PPA
+- **HBM에서의 위치**: 표준 HBM(HBM3E까지)에서 메모리 컨트롤러는 호스트 SoC(GPU · 가속기)에 있다. HBM4 세대부터 base die를 로직 공정으로 만들면서 컨트롤러를 base die로 옮기는 custom HBM 구조가 나왔고, [High-Speed Link Lite](https://github.com/yhkwon-git/High_Speed_Link_Lite)는 이 컨트롤러를 그 구조의 base die에 넣었다
 
 ## 주요 특징
 
@@ -559,4 +560,4 @@ Makefile                       sim, sim-rand, regress, cov, ppa, lint, sim-cocot
 
 ## 관련 프로젝트
 
-[High-Speed Link Lite](https://github.com/yhkwon-git/High_Speed_Link_Lite): HBM base die 디지털 링크 1채널 슬라이스. 그 프로젝트의 메모리 컨트롤러는 호스트가 넣은 명령을 큐 head 순서대로 내보내는 in-order 구조다. 이 저장소의 컨트롤러는 DRAM 쪽을 고정 지연(RL, WL)만 약속하는 DFI 형태 인터페이스로 두어, PHY 앞에 붙일 수 있게 했다.
+[High-Speed Link Lite](https://github.com/yhkwon-git/High_Speed_Link_Lite): 컨트롤러를 base die에 두는 custom HBM 구조를 전제로 한 HBM base die 디지털 1채널 슬라이스. 이 저장소의 v4 컨트롤러 RTL(`44a0bb3`)을 파일 그대로 가져가, DFI 형태 인터페이스로 디지털 PHY(행 · 열 CA 핀, 1.6 GHz beat와 WDQS, RDQS 캡처) · DFT와 묶었다. 컨트롤러가 DRAM 쪽에 고정 지연(RL, WL)만 약속하므로 PHY 앞에 그대로 붙는다.

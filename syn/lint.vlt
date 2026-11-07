@@ -1,0 +1,15 @@
+`verilator_config
+// Lint waivers for the RTL (make lint), each with its reason. A new warning
+// still fails the lint; only these exact ones are waived.
+
+// dram_pkg constants the RTL does not read: RL and REF_POSTPONE_MAX are for
+// the timing checker (tb/dram_timing_checker.sv) and the DRAM model; MAP_BRC
+// is the address-map value that mem_ctrl's default branch implements.
+lint_off -rule UNUSEDPARAM -file "*rtl/dram_pkg.sv" -match "*'RL'*"
+lint_off -rule UNUSEDPARAM -file "*rtl/dram_pkg.sv" -match "*'REF_POSTPONE_MAX'*"
+lint_off -rule UNUSEDPARAM -file "*rtl/dram_pkg.sv" -match "*'MAP_BRC'*"
+
+// host_if's clock and reset are for the testbench side (clocking, assertions);
+// the controller reads only the request and response signals.
+lint_off -rule UNUSEDSIGNAL -file "*rtl/host_if.sv" -match "*'clk'*"
+lint_off -rule UNUSEDSIGNAL -file "*rtl/host_if.sv" -match "*'rst_n'*"

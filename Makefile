@@ -98,7 +98,7 @@ check-tools:
 	@$(PYTHON) -c "import cocotb; print('cocotb', cocotb.__version__)" 2>/dev/null || echo "MISSING: cocotb (optional)"
 
 lint:
-	$(VERILATOR) --lint-only --sv -Wall -Wno-fatal -Irtl $(RTL_SRCS)
+	$(VERILATOR) --lint-only --sv -Wall -Irtl syn/lint.vlt $(RTL_SRCS)
 
 sim: check-verilator
 	$(VERILATOR) $(VFLAGS) $(WAVE_FLAGS) --Mdir $(BUILD_DIR) --top-module $(TOP_TB) \

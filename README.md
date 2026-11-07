@@ -474,7 +474,7 @@ make ppa             # 면적과 타이밍 (sv2v, Yosys, OpenSTA, Nangate45 필�
 make matrix          # 빌드 16 × 트래픽 7 × 두 부하, docs/analysis.md의 표와 heatmap
 make ppa-sweep       # 빌드마다 같은 파라미터로 면적과 타이밍
 make sim WAVES=1     # tb_mem_ctrl.vcd도 기록
-make lint            # Verilator lint-only
+make lint            # Verilator lint-only -Wall: 경고 0, waiver는 이유와 함께 syn/lint.vlt
 ```
 
 - **Windows**: WSL에 Verilator를 설치하고 저장소 폴더에서 `wsl make sim`

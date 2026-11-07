@@ -34,6 +34,8 @@ module mc_chan
 );
 
   localparam int CW = 5;  // longest wait is tRFC - 1 = 11
+  localparam int FAW_M1 = tFAW - 1;
+  localparam logic [CW-1:0] FAW_LOAD = FAW_M1[CW-1:0];
 
   logic [CW-1:0]             ccd_s, rrd_s, wtr_s, rtw, rfc;
   logic [NUM_BG-1:0][CW-1:0] ccd_l, rrd_l, wtr_l;
@@ -45,8 +47,16 @@ module mc_chan
     return (v == '0) ? '0 : v - 1'b1;
   endfunction
 
+  // Low CW bits of an int (a cast to a parameter width does not parse in
+  // every simulator).
+  /* verilator lint_off UNUSEDSIGNAL */
+  function automatic logic [CW-1:0] cw_of(input int x);
+    return x[CW-1:0];
+  endfunction
+  /* verilator lint_on UNUSEDSIGNAL */
+
   function automatic logic [CW-1:0] hold_for(input logic [CW-1:0] v, input int spec);
-    return (int'(dec(v)) >= spec - 1) ? dec(v) : CW'(spec - 1);
+    return (int'(dec(v)) >= spec - 1) ? dec(v) : cw_of(spec - 1);
   endfunction
 
   always_comb begin
@@ -86,12 +96,12 @@ module mc_chan
       rtw   <= do_rd                ? hold_for(rtw, tRTW)     : dec(rtw);
       rfc   <= do_ref               ? hold_for(rfc, tRFC)     : dec(rfc);
       for (int g = 0; g < NUM_BG; g++) begin
-        ccd_l[g] <= ((do_rd || do_wr) && col_bg == BG_BITS'(g)) ? hold_for(ccd_l[g], tCCD_L) : dec(ccd_l[g]);
-        rrd_l[g] <= (do_act && row_bg == BG_BITS'(g))           ? hold_for(rrd_l[g], tRRD_L) : dec(rrd_l[g]);
-        wtr_l[g] <= (do_wr && col_bg == BG_BITS'(g))            ? hold_for(wtr_l[g], tWTR_L) : dec(wtr_l[g]);
+        ccd_l[g] <= ((do_rd || do_wr) && int'(col_bg) == g) ? hold_for(ccd_l[g], tCCD_L) : dec(ccd_l[g]);
+        rrd_l[g] <= (do_act && int'(row_bg) == g)           ? hold_for(rrd_l[g], tRRD_L) : dec(rrd_l[g]);
+        wtr_l[g] <= (do_wr && int'(col_bg) == g)            ? hold_for(wtr_l[g], tWTR_L) : dec(wtr_l[g]);
       end
       for (int i = 0; i < 4; i++) faw_wait[i] <= dec(faw_wait[i]);
-      if (do_act) faw_wait[faw_slot] <= CW'(tFAW - 1);
+      if (do_act) faw_wait[faw_slot] <= FAW_LOAD;
     end
   end
 

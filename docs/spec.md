@@ -96,7 +96,8 @@ DFI-like: commands with fixed data latencies and no busy signal. The controller 
 | `dram_ccmd`, `dram_cbank`, `dram_col` | out | the column command of this cycle |
 | `dram_ap` | out | auto-precharge with this RD/WR (`PAGE_CLOSE`) |
 | `dram_wdata_en`, `dram_wdata` | out | write data, `WL` edges after its WR |
-| `dram_data_valid`, `dram_rdata` | in | read data, `RL` edges after its RD, in RD order |
+| `dram_data_valid`, `dram_rdata` | in | read data, `RL` edges after its RD, in RD order. The controller counts RDs in flight on `dram_data_valid`, so a PHY may return the data later as long as the order holds |
+| `q_empty` | out | both request queues empty: every accepted request has reached the DRAM bus or was answered from the write queue (used by High-Speed Link Lite's lane BIST before it reads back) |
 
 `dram_model` also drives `busy` (the `tRFC` window), `page_hit` and `access_err` for the testbench; the controller does not read them.
 

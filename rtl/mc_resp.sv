@@ -47,11 +47,13 @@ module mc_resp
   logic [DATA_BITS-1:0] wp_d   [WL];
 
   logic [TAG_BITS-1:0]  tag_retire;  // oldest request not yet answered
+  logic [TAG_BITS-1:0]  tag_next;
   logic                 done [TAG_N];
   logic [DATA_BITS-1:0] data [TAG_N];
 
   assign rd_slot_ok    = rf_cnt < 3'(RD_PIPE);
-  assign tag_free      = TAG_BITS'(tag_alloc + 1'b1) != tag_retire;
+  assign tag_next      = tag_alloc + 1'b1;
+  assign tag_free      = tag_next != tag_retire;
   assign dram_wdata_en = wp_v[WL-1];
   assign dram_wdata    = wp_d[WL-1];
   assign rsp_valid     = done[tag_retire];

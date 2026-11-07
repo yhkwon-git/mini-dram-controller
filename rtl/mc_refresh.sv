@@ -32,6 +32,8 @@ module mc_refresh
 
   localparam int PERIOD = (MODE == REF_BANK) ? tREFIpb : tREFI;
   localparam int RW     = $clog2(PERIOD);
+  localparam int PM1    = PERIOD - 1;
+  localparam logic [RW-1:0] REFI_LOAD = PM1[RW-1:0];
 
   logic [RW-1:0] refi;
   logic          tick;
@@ -46,12 +48,12 @@ module mc_refresh
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      refi   <= RW'(PERIOD - 1);
+      refi   <= REFI_LOAD;
       owed   <= '0;
       busy_q <= 1'b0;
       bank   <= '0;
     end else begin
-      refi <= tick ? RW'(PERIOD - 1) : refi - 1'b1;
+      refi <= tick ? REFI_LOAD : refi - 1'b1;
       if (tick && !do_ref)
         owed <= (owed == 4'hF) ? owed : owed + 1'b1;
       else if (!tick && do_ref)

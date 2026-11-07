@@ -227,7 +227,7 @@ module mc_sched
 
     // Banks closed to traffic by refresh: all of them (REF_ALL) or one (REF_BANK)
     for (int b = 0; b < NUM_BANKS; b++)
-      blocked[b] = ref_hold && (REF_MODE == REF_ALL || ref_bank == BANK_BITS'(b));
+      blocked[b] = ref_hold && (REF_MODE == REF_ALL || int'(ref_bank) == b);
 
     // Column commands first: a PRE on the row bus must not meet one on its bank
     col_bank_rdy = '0;
@@ -305,7 +305,7 @@ module mc_sched
       for (int b = NUM_BANKS - 1; b >= 0; b--) begin
         tpre_rdy[b] = bank_open[b] && bank_idle[b] && !wanted[b] && bank_pre_ok[b] &&
                       chan_any_ok && !blocked[b];
-        if (tpre_rdy[b]) tpre_bank = BANK_BITS'(b);
+        if (tpre_rdy[b]) tpre_bank = b[BANK_BITS-1:0];
       end
     end
 
@@ -345,7 +345,7 @@ module mc_sched
           bank_act_ok[b] && chan_refpb_ok) begin
         rfm_go   = 1'b1;
         rfm_cmd  = CMD_REFPB;
-        rfm_bank = BANK_BITS'(b);
+        rfm_bank = b[BANK_BITS-1:0];
       end
     end
     for (int b = NUM_BANKS - 1; b >= 0; b--) begin
@@ -353,7 +353,7 @@ module mc_sched
           chan_any_ok && !col_bank_rdy[b]) begin
         rfm_go   = 1'b1;
         rfm_cmd  = CMD_PRE;
-        rfm_bank = BANK_BITS'(b);
+        rfm_bank = b[BANK_BITS-1:0];
       end
     end
   end

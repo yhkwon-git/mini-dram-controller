@@ -45,6 +45,9 @@ module mem_ctrl_top
   logic [DATA_BITS-1:0] c_req_wdata;
   logic                 c_rsp_valid, c_rsp_ready, c_rsp_err;
   logic [DATA_BITS-1:0] c_rsp_rdata;
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic                 c_q_empty;  // used by High-Speed Link Lite's lane BIST, not here
+  /* verilator lint_on UNUSEDSIGNAL */
 
   dram_cmd_e            d_rcmd, d_ccmd;
   logic [BANK_BITS-1:0] d_rbank, d_cbank;
@@ -120,7 +123,8 @@ module mem_ctrl_top
     .dram_wdata_en   (d_wdata_en),
     .dram_wdata      (d_wdata),
     .dram_data_valid (d_data_valid),
-    .dram_rdata      (d_rdata)
+    .dram_rdata      (d_rdata),
+    .q_empty         (c_q_empty)
   );
 
   dram_model u_dram (

@@ -483,6 +483,7 @@ make lint            # Verilator lint-only
 - **cocotb (선택, ≥ 2.0)**: `pip install cocotb && make sim-cocotb`. 리셋 직후 idle 상태만 보는 smoke test다
 - 실패한 랜덤 실행은 `build/regress/<빌드>_<패턴>_seed<번호>.log`에 로그가 남고, 같은 `+PATTERN` · `+SEED`로 그대로 재현된다
 - 빌드 결과는 `obj_dir*/`, `build/`에 생기며 git에서 제외된다
+- 컨트롤러 RTL(`rtl/dram_pkg.sv`, `mem_ctrl.sv`, `mc_*.sv`)은 ModelSim-Altera 10.1d에서도 컴파일된다. 그 버전이 읽지 못하는 폭이 파라미터인 캐스트(`BANK_BITS'(b)` 등)는 쓰지 않는다
 
 ## 저장소 구조
 

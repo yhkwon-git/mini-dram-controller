@@ -66,7 +66,12 @@ module mem_ctrl
   output logic                 dram_wdata_en,
   output logic [DATA_BITS-1:0] dram_wdata,
   input  logic                 dram_data_valid,
-  input  logic [DATA_BITS-1:0] dram_rdata
+  input  logic [DATA_BITS-1:0] dram_rdata,
+
+  // Both request queues are empty: every accepted request has reached the
+  // DRAM bus or was answered from the write queue. A test engine on the PHY
+  // side can wait for it before reading back what it wrote.
+  output logic                 q_empty
 );
 
   localparam int AW = $clog2(DEPTH);
@@ -125,6 +130,7 @@ module mem_ctrl
   assign collide   =  req_write && |q_match[0];
   assign req_ready = tag_free && (fwd || q_has_free[req_write]) && !collide;
   assign acc       = req_valid && req_ready;
+  assign q_empty   = (q_valid == '0);
   assign q_push    = {acc && req_write, acc && !req_write && !fwd};
   assign rsp_err   = 1'b0;
 
@@ -197,8 +203,8 @@ module mem_ctrl
 
   for (genvar b = 0; b < NUM_BANKS; b++) begin : g_bank
     logic row_here, col_here;
-    assign row_here = (rbank == BANK_BITS'(b));
-    assign col_here = (cbank == BANK_BITS'(b));
+    assign row_here = (int'(rbank) == b);
+    assign col_here = (int'(cbank) == b);
     mc_bank #(.PAGE_TIMEOUT(PAGE_TIMEOUT)) u_bank (
       .clk       (clk),
       .rst_n     (rst_n),

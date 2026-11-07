@@ -58,7 +58,7 @@ module mc_queue
     for (int i = DEPTH - 1; i >= 0; i--) begin
       if (!q_valid[i]) begin
         has_free = 1'b1;
-        free_idx = AW'(i);
+        free_idx = i[AW-1:0];
       end
     end
     for (int j = 0; j < DEPTH; j++)

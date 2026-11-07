@@ -44,6 +44,8 @@ module mc_bank
 
   localparam int CW = 4;  // longest wait is tRC - 1 = 8, or tRAS - 1 + tRP = 8 after auto-precharge
   localparam int IW = $clog2(PAGE_TIMEOUT + 1);
+  localparam int PT = PAGE_TIMEOUT;
+  localparam logic [IW-1:0] IDLE_MAX = PT[IW-1:0];
 
   logic [CW-1:0] act_wait, col_wait, pre_wait, pre_next;
   logic [IW-1:0] idle;
@@ -54,14 +56,22 @@ module mc_bank
   endfunction
 
   // Remaining time after this edge when a new rule of spec edges starts now.
+  // Low CW bits of an int (a cast to a parameter width does not parse in
+  // every simulator).
+  /* verilator lint_off UNUSEDSIGNAL */
+  function automatic logic [CW-1:0] cw_of(input int x);
+    return x[CW-1:0];
+  endfunction
+  /* verilator lint_on UNUSEDSIGNAL */
+
   function automatic logic [CW-1:0] hold_for(input logic [CW-1:0] v, input int spec);
-    return (int'(dec(v)) >= spec - 1) ? dec(v) : CW'(spec - 1);
+    return (int'(dec(v)) >= spec - 1) ? dec(v) : cw_of(spec - 1);
   endfunction
 
   assign act_ok    = !is_open && act_wait == '0;
   assign col_ok    =  is_open && col_wait == '0;
   assign pre_ok    =  is_open && pre_wait == '0;
-  assign idle_long = (idle == IW'(PAGE_TIMEOUT));
+  assign idle_long = (idle == IDLE_MAX);
   assign raa_imt   = (raa >= 5'(RAA_IMT));
   assign raa_mmt   = (raa >= 5'(RAA_MMT));
 
@@ -90,7 +100,7 @@ module mc_bank
       col_wait <= dec(col_wait);
       pre_wait <= pre_next;
       if (do_act || do_rd || do_wr) idle <= '0;
-      else if (idle != IW'(PAGE_TIMEOUT)) idle <= idle + 1'b1;
+      else if (idle != IDLE_MAX) idle <= idle + 1'b1;
       if (do_act) begin
         is_open  <= 1'b1;
         open_row <= act_row;
@@ -107,7 +117,7 @@ module mc_bank
       if ((do_rd || do_wr) && do_ap) begin
         is_open  <= 1'b0;
         act_wait <= (int'(dec(act_wait)) >= int'(pre_next) + tRP) ? dec(act_wait)
-                                                                : CW'(int'(pre_next) + tRP);
+                                                                : cw_of(int'(pre_next) + tRP);
       end
     end
   end

@@ -30,14 +30,18 @@ module mc_wdrain
 );
 
   localparam int CW = $clog2(DEPTH + 1);
+  localparam int LO_I = WR_LO;
+  localparam int HI_I = WR_HI;
+  localparam logic [CW-1:0] LO = LO_I[CW-1:0];
+  localparam logic [CW-1:0] HI = HI_I[CW-1:0];
 
   logic [CW-1:0] n_wr;
   logic          drain, drain_next;
 
   always_comb begin
     n_wr = '0;
-    for (int i = 0; i < DEPTH; i++) n_wr += CW'(wq_valid[i]);
-    drain_next = drain ? (n_wr > CW'(WR_LO)) : (n_wr >= CW'(WR_HI));
+    for (int i = 0; i < DEPTH; i++) n_wr += {{(CW-1){1'b0}}, wq_valid[i]};
+    drain_next = drain ? (n_wr > LO) : (n_wr >= HI);
   end
 
   always_ff @(posedge clk or negedge rst_n) begin

@@ -26,7 +26,7 @@ SK hynix HBM Digital Design (RTL Design) 지원 · 권용현
 | 데이터 버스, 읽기만 · 쓰기만<br>같은 장치의 v3 방식 63.3% (+27%) | 600만 요청 · 패턴 6 · 빌드 16<br>규칙 위반 0 · 기능 bin 32/32 | 뱅크별 ACT 카운터와 RFM<br>한도 도달 131,879회에도 위반 0 | Nangate45 최소 주기 2.874 ns<br>v3 337 MHz · 면적 18,912 µm² |
 
 > [!NOTE]
-> 수치는 모두 commit `ab9d522` 기준이다(Verilator 5.052, Yosys 0.52, OpenSTA 3.1). v3 비교값은 commit `1b0943a`, v2는 `c1b8248`, v1은 `2eabd33`을 같은 TB로 돌려 쟀다. v4부터 DRAM 모델에 뱅크 그룹이 생겨, 같은 장치에서의 비교는 v4를 v3 방식으로 빌드한 값(`bus1_refab`)으로 한다. PDF는 2쪽(v0 → v4 요약)과 22–26쪽(v2 – v4)이 이 수치를 쓰고, 3–21쪽의 파형과 수치는 v1(commit `6049e5a`) 기준이다.
+> 수치는 모두 commit `ab9d522` 기준이다(Verilator 5.052, Yosys 0.52, OpenSTA 3.1). v3 비교값은 commit `1b0943a`, v2는 `c1b8248`, v1은 `2eabd33`을 같은 TB로 돌려 쟀다. v4부터 DRAM 모델에 뱅크 그룹이 생겨, 같은 장치에서의 비교는 v4를 v3 방식으로 빌드한 값(`bus1_refab`)으로 한다. PDF는 2쪽(v0 → v4 요약), 3–21쪽(v4 상세), 22–26쪽(v2 – v4 비교)이 이 수치를 쓴다. 3–21쪽의 v4 파형은 RTL `44a0bb3`(ModelSim 캐스트와 `q_empty` 출력만 더했고 directed 로그가 같다)의 VCD다.
 
 ## 개요
 
@@ -277,7 +277,7 @@ flowchart TB
 | 6 | 포워딩 | 같은 주소 쓰기 2건 뒤 읽기: 나중 쓰기의 데이터, DRAM RD 0건. 그 뱅크의 refresh 직후(tRFCpb 동안 ACT가 못 나감)에 시작해 타이밍이 고정된다 |
 
 <details>
-<summary>회귀 로그 (commit <code>ab9d522</code>, Verilator 5.052)</summary>
+<summary>회귀 로그 (commit <code>ab9d522</code>, Verilator 5.052. <code>44a0bb3</code>에서도 같다)</summary>
 
 ```text
 [TB] === SCENARIO 1: page hit WR→RD ===
@@ -340,6 +340,18 @@ flowchart TB
 ```
 
 </details>
+
+### v4 파형
+
+`make sim WAVES=1`의 VCD(RTL `44a0bb3`)에서 두 구간을 그렸다. 육각형은 그 명령이 버스에 있는 사이클이고, 장치는 오른쪽 상승 엣지에서 샘플한다.
+
+![쓰기 흐름 파형. 수락 다음 엣지에 응답하고, 행 버스와 열 버스에 같은 엣지에 명령이 나가며, bank 1만 PRE → REFpb → tRFCpb 8 동안 막힌다](docs/images/wave_v4_writes.png)
+
+<sub>시나리오 5 앞의 쓰기(cycle 281–302). ① 수락 다음 엣지에 응답(posted) ② 행 버스 ACT b0와 열 버스 WR b1이 같은 엣지 ③ bank 1의 refresh 차례: PRE b1과 WR b2가 같은 엣지 ④ REFpb b1(PRE + tRP 3), 그동안 다른 뱅크는 계속 ⑤ ACT b1 = REFpb + tRFCpb 8. REFpb는 16사이클마다 다음 뱅크로 간다(b0 278 → b1 294).</sub>
+
+![refresh 직후 같은 주소 파형. 쓰기 둘은 바로 응답하고, 그 주소 읽기는 쓰기 큐에서 답하며, ACT 뒤 WR 둘과 RD가 tRCD, tCCD_L, tWTR_L, RL 간격으로 나간다](docs/images/wave_v4_forwarding.png)
+
+<sub>시나리오 6(cycle 562–585, 주소 1572 = bank 2 · row 55 · col 2). ① REFpb b2 ② 같은 주소 쓰기 둘, 다음 엣지에 응답 ③ 그 주소 읽기는 나중 쓰기의 데이터로 바로 응답하고 열 버스에 RD가 없다 ④ ACT(REFpb + 8) → WR(tRCD 3) → WR(tCCD_L 2) ⑤ 쓰기가 나간 뒤의 읽기: RD(WR + tWTR_L 4) → 데이터(RL 3) → 응답, hit RD 5사이클.</sub>
 
 ### 타이밍 규칙 검사
 
@@ -409,7 +421,7 @@ flowchart TB
 
 <sub>v1, `rsp_ready`가 풀리는 구간. 위 세 줄은 수정 전, 아래 두 줄은 수정 후다. 수정 전에는 tag 4 자리에 17번째 read의 데이터(`10`)가 나가고 16건 뒤 `rsp_valid`가 내려간다. 수정 후에는 `00`부터 `13`까지 20건이 순서대로 나간다.</sub>
 
-같은 재검증에서 나온 나머지 항목은 PDF 20쪽에 정리했다. 병렬성 체크(C)는 `7e2d4b5`에서, handoff +1(B)은 v2에서, out-of-order dispatch와 write-hit 미검증(D)은 랜덤 회귀에서 닫았다. 모델 오류 경로(E)는 남아 있다.
+같은 재검증에서 나온 나머지 항목과 v1 → v4의 이슈 기록은 PDF 18쪽에 정리했다. 병렬성 체크(C)는 `7e2d4b5`에서, handoff +1(B)은 v2에서, out-of-order dispatch와 write-hit 미검증(D)은 랜덤 회귀에서 닫았다. 모델 오류 경로(E)는 남아 있다.
 
 ## 디버그: 포워딩 판정이 한 사이클 어긋남 (v3)
 
@@ -430,7 +442,7 @@ flowchart TB
 | reg2reg (ns) | 0.809 | 2.880 | 2.753 | 4.765 | 2.922 | **2.831** |
 | ≈ fmax (MHz) | 1,182 | 343 | 357 | 208 | 337 | **348** |
 
-<sub>≈ fmax는 1 / 최소 주기다. 최소 주기는 reg2reg 지연에 캡처 플롭의 setup을 더한 값이다(v4: 2.831 + 0.043 = 2.874 ns, `make ppa`가 쓰는 `ppa.csv`의 `min_period_ns`). 같은 RTL이 [High-Speed Link Lite](https://github.com/yhkwon-git/High_Speed_Link_Lite)의 칩 STA에서는 2.18 ns(459 MHz)로 나온다. 그 흐름은 칩 전체를 모듈 경계를 유지한 채 `abc -D 1250 -constr`(목표 1.25 ns)로 매핑하고 팬아웃 버퍼 트리를 넣는다. 여기 `make ppa`는 `mem_ctrl`만 flatten해 타이밍 목표와 팬아웃 버퍼 없이 매핑한다. 어느 차이가 몇 %인지는 나눠 재지 않았다.</sub>
+<sub>≈ fmax는 1 / 최소 주기다. 최소 주기는 reg2reg 지연에 캡처 플롭의 setup을 더한 값이다(v4: 2.831 + 0.043 = 2.874 ns, `make ppa`가 쓰는 `ppa.csv`의 `min_period_ns`). 같은 RTL이 [High-Speed Link Lite](https://github.com/yhkwon-git/High_Speed_Link_Lite)의 칩 STA에서는 2.18 ns(458 MHz, HSL `3d596a4`)로 나온다. 그 흐름은 칩 전체를 모듈 경계를 유지한 채 `abc -D 1250 -constr`(목표 1.25 ns)로 매핑하고 팬아웃 버퍼 트리를 넣는다. 여기 `make ppa`는 `mem_ctrl`만 flatten해 타이밍 목표와 팬아웃 버퍼 없이 매핑한다. 어느 차이가 몇 %인지는 나눠 재지 않았다.</sub>
 
 v4는 기능이 늘었는데도 v3보다 빠르다. 명령 버스가 하나일 때는 RD/WR와 ACT/PRE 중 하나를 고르는 단계(`use_col`, FCFS면 나이 비교까지)가 critical path에 있었다. 두 버스에서는 그 단계가 필요 없다. RFM을 넣기 전에는 2.612 ns(377 MHz, 커밋 전 측정)였고, 뱅크별 RAA 카운터와 RFM 명령 선택이 행 버스 앞에 붙어 2.831 ns가 됐다.
 
@@ -530,8 +542,8 @@ docs/
   analysis.md                  트래픽 × 기능 매트릭스, 성능 대 면적 · 타이밍, 권장 설정
   coverage.md                  시나리오별 확인 항목, 닫힌 구멍과 남은 구멍
   data/                        버전 비교 그래프의 기준값 (v1, v2, v3)
-  images/                      README 그래프와 파형
-portfolio-deck/                포트폴리오 PDF, PPTX (v0 → v4 요약, v1 상세, v2 – v4)
+  images/                      README 그래프와 파형 (v1 back-pressure · 4-bank burst, v4 쓰기 흐름 · 포워딩)
+portfolio-deck/                포트폴리오 PDF, PPTX (v0 → v4 요약, v4 상세, v2 – v4 비교)
 Makefile                       sim, sim-rand, regress, cov, ppa, lint, sim-cocotb, clean
 ```
 
@@ -544,12 +556,12 @@ Makefile                       sim, sim-rand, regress, cov, ppa, lint, sim-cocot
 | [스케줄러 latency · throughput](docs/scheduler-throughput.md) | v0 – v4 경로별 latency, 처리량, 두 버스 · refresh 방식 · 정책 · 매핑 비교, trade-off |
 | [분석](docs/analysis.md) | 트래픽 7종 × 빌드 16개 × 두 부하, refresh · 버스 · 매핑 · 큐 깊이 · 정책별 성능과 면적 · 타이밍, 권장 설정 |
 | [커버리지](docs/coverage.md) | 시나리오별 확인 항목, 랜덤 회귀로 닫힌 구멍, 남은 구멍 |
-| [포트폴리오 PDF](portfolio-deck/MiniDramController_Portfolio.pdf) | 27쪽. v0 → v4 요약(2쪽), v1의 아키텍처 · RTL · 파형 · 디버그 · PPA(3–21쪽), v2 – v4의 구조 · 검증 · 성능 · 트래픽 분석 · PPA(22–26쪽) |
+| [포트폴리오 PDF](portfolio-deck/MiniDramController_Portfolio.pdf) | 27쪽. v0 → v4 요약(2쪽), v4 상세: 스펙 · 구조 · RTL · 파형 · 검증 · 디버그 · trade-off · HSL 연결 · 버전별 latency(3–21쪽), v2 – v4 비교: 구조 · 검증 · 성능 · 트래픽 분석 · PPA(22–26쪽) |
 
 ## 다음 단계
 
 - [ ] DFI 1 : 2 주파수 비율: 400 MHz에서 클럭마다 명령 슬롯 두 개. High-Speed Link Lite의 칩 STA에서 이 컨트롤러가 800 MHz를 닫지 못했다(2.18 ns). 한 클럭에 명령을 고르고 모든 뱅크 타이머를 갱신하는 루프가 그 경로다
-- [ ] 읽기 반환 깊이(`RD_PIPE`, 지금 최대 4)를 PHY 왕복에 맞추기: High-Speed Link Lite의 PHY에서는 RD 하나가 슬롯을 약 9클럭 잡아, 연속 읽기가 데이터 버스의 절반 아래에 묶인다(읽기 32개 97클럭)
+- [ ] 읽기 반환 깊이(`RD_PIPE`, 지금 최대 4)를 PHY 왕복에 맞추기: High-Speed Link Lite의 PHY에서는 RD 하나가 낸 클럭부터 data_valid까지 슬롯을 8클럭(이 저장소 모델은 3클럭) 잡아, 연속 읽기가 데이터 버스의 절반 아래에 묶인다(읽기 32개 97클럭)
 - [ ] 뱅크 그룹을 word 단위로 섞으면서 XOR 해싱을 유지하는 매핑 (연속 주소와 stride를 함께)
 - [ ] 배치 · 배선이 있는 흐름(OpenROAD)으로 기능별 타이밍 비용 다시 재기
 - [ ] 응답 버퍼(FF의 34%) 축소, `dram_model` 오류 경로 negative test

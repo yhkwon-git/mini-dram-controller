@@ -8,7 +8,6 @@ Spec → RTL → Verification → Performance / PPA
 [![RTL](https://img.shields.io/badge/RTL-SystemVerilog-1f6feb)](rtl/)
 [![Sim](https://img.shields.io/badge/Sim-Verilator%205.052-2ea44f)](Makefile)
 [![Synth](https://img.shields.io/badge/Synth%20%2F%20STA-Yosys%200.52%20%C2%B7%20OpenSTA%203.1-8250df)](#ppa)
-[![License](https://img.shields.io/badge/License-MIT-lightgrey)](LICENSE)
 
 **[📄 포트폴리오 PDF (27쪽)](portfolio-deck/MiniDramController_Portfolio.pdf)** · [PPTX](portfolio-deck/MiniDramController_Portfolio.pptx) · [스펙 문서](docs/spec.md) · [검증 문서](docs/verification.md)
 
@@ -351,7 +350,7 @@ flowchart TB
 
 ![refresh 직후 같은 주소 파형. 쓰기 둘은 바로 응답하고, 그 주소 읽기는 쓰기 큐에서 답하며, ACT 뒤 WR 둘과 RD가 tRCD, tCCD_L, tWTR_L, RL 간격으로 나간다](docs/images/wave_v4_forwarding.png)
 
-<sub>시나리오 6(cycle 562–585, 주소 1572 = bank 2 · row 55 · col 2). ① REFpb b2 ② 같은 주소 쓰기 둘, 다음 엣지에 응답 ③ 그 주소 읽기는 나중 쓰기의 데이터로 바로 응답하고 열 버스에 RD가 없다 ④ ACT(REFpb + 8) → WR(tRCD 3) → WR(tCCD_L 2) ⑤ 쓰기가 나간 뒤의 읽기: RD(WR + tWTR_L 4) → 데이터(RL 3) → 응답, hit RD 5사이클.</sub>
+<sub>시나리오 6(cycle 562–585, 주소 1572 = bank 2 · row 55 · col 2). ① REFpb b2 ② 같은 주소 쓰기 둘, 다음 엣지에 응답 ③ 그 주소 읽기는 나중 쓰기의 데이터로 바로 응답하고 열 버스에 RD가 없다 ④ ACT(REFpb + 8) → WR(tRCD 3) → WR(tCCD_L 2) ⑤ 쓰기가 나간 뒤의 읽기: RD(마지막 WR 뒤 4클럭으로 tWTR_L 충족) → 데이터(RL 3) → 응답, hit RD 5사이클.</sub>
 
 ### 타이밍 규칙 검사
 

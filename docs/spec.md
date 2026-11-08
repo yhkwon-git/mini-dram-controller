@@ -117,7 +117,7 @@ Simple valid/ready (`host_if` is a combinational pass-through).
 | Order | responses return in request order (`tag_retire`); requests finish out of order, and finished data waits in the 16-entry response buffer |
 | Complete | RD: when its data arrives (`RL`), or when it is accepted if forwarded. WR: when it is accepted (posted), with `rsp_rdata = 0` |
 | Backpressure | while `rsp_ready = 0`, finished responses wait in the buffer; new requests stop once 15 are in flight |
-| `rsp_err` | reserved; v3 drives 0 |
+| `rsp_err` | reserved; v4 drives 0 |
 
 ---
 
@@ -227,4 +227,4 @@ The owed counter runs whatever the traffic does, so every bank is refreshed once
 | Directed TB (6 scenarios) and random TB (6 patterns, 32 bins, 15 build variants) | `tb/` |
 | Area and timing flow | `make ppa` (`syn/ppa.sh`) |
 | Negative tests that drive `dram_model` directly | TODO |
-| Traffic × policy matrix, area and timing per feature | TODO (next step) |
+| Traffic × policy matrix, area and timing per feature | done: `make matrix`, `make ppa-sweep`, [analysis.md](analysis.md) (322632f) |

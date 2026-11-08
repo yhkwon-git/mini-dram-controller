@@ -23,7 +23,7 @@ SK hynix HBM Digital Design (RTL Design) 지원 · 권용현
 | 포화 처리량 (row hit) | 랜덤 회귀 | RowHammer 대응 | 동작 주파수 |
 | :---: | :---: | :---: | :---: |
 | **80.7%** | **1,200 / 1,200 PASS** | **RAA 한도 위반 0** | **348 MHz** |
-| 데이터 버스, 읽기만 · 쓰기만<br>같은 장치의 v3 방식 63.3% (+27%) | 600만 요청 · 패턴 6 · 빌드 16<br>규칙 위반 0 · 기능 bin 32/32 | 뱅크별 ACT 카운터와 RFM<br>한도 도달 131,879회에도 위반 0 | Nangate45 reg2reg 2.831 ns<br>v3 337 MHz · 면적 18,912 µm² |
+| 데이터 버스, 읽기만 · 쓰기만<br>같은 장치의 v3 방식 63.3% (+27%) | 600만 요청 · 패턴 6 · 빌드 16<br>규칙 위반 0 · 기능 bin 32/32 | 뱅크별 ACT 카운터와 RFM<br>한도 도달 131,879회에도 위반 0 | Nangate45 최소 주기 2.874 ns<br>v3 337 MHz · 면적 18,912 µm² |
 
 > [!NOTE]
 > 수치는 모두 commit `ab9d522` 기준이다(Verilator 5.052, Yosys 0.52, OpenSTA 3.1). v3 비교값은 commit `1b0943a`, v2는 `c1b8248`, v1은 `2eabd33`을 같은 TB로 돌려 쟀다. v4부터 DRAM 모델에 뱅크 그룹이 생겨, 같은 장치에서의 비교는 v4를 v3 방식으로 빌드한 값(`bus1_refab`)으로 한다. PDF는 2쪽(v0 → v4 요약)과 22–26쪽(v2 – v4)이 이 수치를 쓰고, 3–21쪽의 파형과 수치는 v1(commit `6049e5a`) 기준이다.
@@ -430,6 +430,8 @@ flowchart TB
 | reg2reg (ns) | 0.809 | 2.880 | 2.753 | 4.765 | 2.922 | **2.831** |
 | ≈ fmax (MHz) | 1,182 | 343 | 357 | 208 | 337 | **348** |
 
+<sub>≈ fmax는 1 / 최소 주기다. 최소 주기는 reg2reg 지연에 캡처 플롭의 setup을 더한 값이다(v4: 2.831 + 0.043 = 2.874 ns, `make ppa`가 쓰는 `ppa.csv`의 `min_period_ns`). 같은 RTL이 [High-Speed Link Lite](https://github.com/yhkwon-git/High_Speed_Link_Lite)의 칩 STA에서는 2.18 ns(459 MHz)로 나온다. 그 흐름은 칩 전체를 모듈 경계를 유지한 채 `abc -D 1250 -constr`(목표 1.25 ns)로 매핑하고 팬아웃 버퍼 트리를 넣는다. 여기 `make ppa`는 `mem_ctrl`만 flatten해 타이밍 목표와 팬아웃 버퍼 없이 매핑한다. 어느 차이가 몇 %인지는 나눠 재지 않았다.</sub>
+
 v4는 기능이 늘었는데도 v3보다 빠르다. 명령 버스가 하나일 때는 RD/WR와 ACT/PRE 중 하나를 고르는 단계(`use_col`, FCFS면 나이 비교까지)가 critical path에 있었다. 두 버스에서는 그 단계가 필요 없다. RFM을 넣기 전에는 2.612 ns(377 MHz, 커밋 전 측정)였고, 뱅크별 RAA 카운터와 RFM 명령 선택이 행 버스 앞에 붙어 2.831 ns가 됐다.
 
 ### v3 첫 구현의 타이밍 문제
@@ -546,9 +548,12 @@ Makefile                       sim, sim-rand, regress, cov, ppa, lint, sim-cocot
 
 ## 다음 단계
 
+- [ ] DFI 1 : 2 주파수 비율: 400 MHz에서 클럭마다 명령 슬롯 두 개. High-Speed Link Lite의 칩 STA에서 이 컨트롤러가 800 MHz를 닫지 못했다(2.18 ns). 한 클럭에 명령을 고르고 모든 뱅크 타이머를 갱신하는 루프가 그 경로다
+- [ ] 읽기 반환 깊이(`RD_PIPE`, 지금 최대 4)를 PHY 왕복에 맞추기: High-Speed Link Lite의 PHY에서는 RD 하나가 슬롯을 약 9클럭 잡아, 연속 읽기가 데이터 버스의 절반 아래에 묶인다(읽기 32개 97클럭)
 - [ ] 뱅크 그룹을 word 단위로 섞으면서 XOR 해싱을 유지하는 매핑 (연속 주소와 stride를 함께)
 - [ ] 배치 · 배선이 있는 흐름(OpenROAD)으로 기능별 타이밍 비용 다시 재기
 - [ ] 응답 버퍼(FF의 34%) 축소, `dram_model` 오류 경로 negative test
+- [x] High-Speed Link Lite의 PHY 앞에 DFI 형태로 연결 (이 저장소 `44a0bb3`의 RTL을 그쪽 `0193c04`가 파일 그대로 사용, `q_empty` 출력 추가)
 - [x] 트래픽 × 정책 매트릭스(64 word stride 포함)와 기능별 면적 · 타이밍 trade-off 표 ([분석](docs/analysis.md))
 - [x] 행 · 열 명령 버스 분리, 뱅크 그룹(tCCD · tRRD · tWTR의 S/L), per-bank refresh, RFM (v4)
 - [x] 읽기 · 쓰기 큐 분리, posted write와 포워딩, 쓰기 모아 보내기 (v3)
@@ -560,4 +565,4 @@ Makefile                       sim, sim-rand, regress, cov, ppa, lint, sim-cocot
 
 ## 관련 프로젝트
 
-[High-Speed Link Lite](https://github.com/yhkwon-git/High_Speed_Link_Lite): 컨트롤러를 base die에 두는 custom HBM 구조를 전제로 한 HBM base die 디지털 1채널 슬라이스. 이 저장소의 v4 컨트롤러 RTL(`44a0bb3`)을 파일 그대로 가져가, DFI 형태 인터페이스로 디지털 PHY(행 · 열 CA 핀, 1.6 GHz beat와 WDQS, RDQS 캡처, SECDED ECC) · DFT · DFD(레인 BIST, March MBIST, BIRA와 fuse repair, trace buffer · MISR, IEEE 1500 방식 시험 포트)와 묶었다. 컨트롤러가 DRAM 쪽에 고정 지연(RL, WL)만 약속하므로 PHY 앞에 그대로 붙는다.
+[High-Speed Link Lite](https://github.com/yhkwon-git/High_Speed_Link_Lite): 컨트롤러를 base die에 두는 custom HBM 구조를 전제로 한 HBM base die 디지털 1채널 슬라이스. 이 저장소의 v4 컨트롤러 RTL(`44a0bb3`)을 파일 그대로 가져가, DFI 형태 인터페이스로 디지털 PHY(행 · 열 CA 핀, 1.6 GHz beat와 WDQS, RDQS 캡처, SECDED ECC) · DFT · DFD(레인 BIST, March MBIST, BIRA와 fuse repair, trace buffer · MISR, IEEE 1500 방식 시험 포트)와 묶었다. 컨트롤러는 쓰기 데이터만 WR 뒤 고정 지연(WL)으로 내고 읽기 데이터는 `data_valid`가 오는 순서로 받으므로, 읽기 지연이 고정되지 않은 PHY 앞에도 그대로 붙는다(진행 중 RD 수는 `RD_PIPE`로 제한).

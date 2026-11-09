@@ -53,7 +53,7 @@ DRAM 접근 지연은 뱅크 상태에 따라 크게 달라진다. 같은 bank 0
 | 요청 큐 | 읽기 8 + 쓰기 8. RD/WR가 나갈 때까지 머문다. push 때 큐마다 age matrix(`q_older`)를 기록하고, 두 큐 사이의 순서는 `mc_xage`가 둔다. 같은 주소의 쓰기는 들어온 순서대로 나간다(`q_dep`) |
 | 쓰기 응답 | posted write: 수락하는 엣지에 응답이 준비된다. 쓰기 큐에 같은 주소가 있는 읽기는 가장 나중 쓰기의 데이터로 바로 응답하고(포워딩) DRAM에 가지 않는다. 읽기 큐에 같은 주소가 있는 쓰기는 그 읽기가 나갈 때까지 호스트 포트에서 기다린다 |
 | 쓰기 모아 보내기 | 쓰기가 6개 쌓이면 2개로 줄 때까지, 그리고 읽기가 없을 때 쓰기 우선(`mc_wdrain`). 금지가 아니라 우선순위라서 선택된 큐가 못 쓰는 슬롯은 다른 큐가 쓴다 |
-| 스케줄러 | 매 사이클 요청마다 다음 명령(hit → RD/WR, miss → ACT, conflict → PRE)과 준비 여부를 계산한다. 준비된 RD/WR 중 가장 오래된 것, 없으면 ACT/PRE 중 가장 오래된 것(FR-FCFS). 열린 row를 쓸 요청이 남아 있으면 그 뱅크를 닫지 않는다 |
+| 스케줄러 | 매 사이클 요청마다 다음 명령(hit → RD/WR, miss → ACT, conflict → PRE)과 준비 여부를 계산한다. 준비된 RD/WR 중 가장 오래된 것은 열 버스로, ACT/PRE 중 가장 오래된 것은 행 버스로 같은 사이클에 낸다(FR-FCFS. 명령 버스가 하나인 v3 방식 빌드는 RD/WR가 먼저). 열린 row를 쓸 요청이 남아 있으면 그 뱅크를 닫지 않는다 |
 | Page 정책 | open(기본), close(같은 row를 쓸 요청이 없으면 RD/WR에 auto-precharge), timer(16사이클 동안 쓰지 않고 기다리는 요청도 없는 row를 PRE) |
 | 주소 매핑 | XOR(기본, `{row, bank ^ row[1:0], col}`), row:bank:col, row:col:bank, bank:row:col(v2) |
 | 명령 버스 | 행 버스(ACT · PRE · PREA · REF · REFpb)와 열 버스(RD · WR)가 따로 있어 한 사이클에 둘 다 나간다(HBM 방식). 열 명령이 준비된 뱅크에는 PRE를 보내지 않는다 |
@@ -564,7 +564,7 @@ Makefile                       sim, sim-rand, regress, cov, ppa, lint, sim-cocot
 - [ ] 뱅크 그룹을 word 단위로 섞으면서 XOR 해싱을 유지하는 매핑 (연속 주소와 stride를 함께)
 - [ ] 배치 · 배선이 있는 흐름(OpenROAD)으로 기능별 타이밍 비용 다시 재기
 - [ ] 응답 버퍼(FF의 34%) 축소, `dram_model` 오류 경로 negative test
-- [x] High-Speed Link Lite의 PHY 앞에 DFI 형태로 연결 (이 저장소 `44a0bb3`의 RTL을 그쪽 `0193c04`가 파일 그대로 사용, `q_empty` 출력 추가)
+- [x] High-Speed Link Lite의 PHY 앞에 DFI 형태로 연결 (이 저장소 `44a0bb3`의 RTL을 그쪽 `0193c04`가 파일 그대로 사용, `q_empty` 출력 추가. 읽기 지연을 고정값처럼 적었던 헤더 주석은 `422036a`에서 고쳐 그쪽에도 같게 둠)
 - [x] 트래픽 × 정책 매트릭스(64 word stride 포함)와 기능별 면적 · 타이밍 trade-off 표 ([분석](docs/analysis.md))
 - [x] 행 · 열 명령 버스 분리, 뱅크 그룹(tCCD · tRRD · tWTR의 S/L), per-bank refresh, RFM (v4)
 - [x] 읽기 · 쓰기 큐 분리, posted write와 포워딩, 쓰기 모아 보내기 (v3)

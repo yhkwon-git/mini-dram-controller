@@ -200,7 +200,7 @@ flowchart TB
 | 큐 8 + 8은? | 처리량 +6%에 면적 +46% | 4 + 4는 읽기 latency 절반, 면적 −31% |
 | RD 파이프라이닝은? | 필수 | 1개로 줄이면 포화 −19%, 면적 0.4% |
 | FR-FCFS 대 FCFS는? | 이 모델에서는 같다 | FCFS가 면적 +8%(두 큐 사이 나이 필요) |
-| 쓰기 모아 보내기는? | 평균은 좋고 꼬리는 나쁘다 | 읽기 평균 −1.7%, p99 +9% |
+| 쓰기 모아 보내기는? | 평균은 좋고 꼬리는 나쁘다 | 읽기 평균 −1.7%, p99 +9%(분석 매트릭스의 랜덤 부하) |
 
 <sub>fmax는 같은 논리의 세 매핑이 310 MHz, XOR 게이트 두 개가 더 있는 기본 빌드가 348 MHz일 만큼 ABC 잡음(±12%)이 커서, 기능 하나의 타이밍 비용은 이 흐름으로 가려내지 않았다. FF와 면적 차이는 구조에서 나온다.</sub>
 
@@ -215,7 +215,7 @@ flowchart TB
 | FR-FCFS와 row 보호 | row hit을 먼저 처리해 hit rate와 처리량이 오른다 | 오래된 conflict 요청이 밀릴 수 있어 starvation 보호가 필요하다 |
 | 읽기 · 쓰기 큐 분리 | 쓰기가 읽기 자리를 차지하지 않는다. 읽기 큐는 데이터를 저장하지 않는다 | 엔트리 16개, 두 큐 사이 순서(`mc_xage`, `WDRAIN = 0`일 때만 합성됨) |
 | posted write + 포워딩 | 쓰기 응답 1사이클. RAW 읽기 37,434건이 DRAM 없이 응답(기본 빌드 회귀) | 같은 주소 읽기가 큐에 있으면 쓰기를 포트에서 잡는다 |
-| 쓰기 모아 보내기 | 방향 전환 −19%, 읽기 latency −1.5% | 처리량 이득은 없다(FR-FCFS가 이미 묶는다) |
+| 쓰기 모아 보내기 | 방향 전환 −19%, 읽기 latency −1.5%(회귀 6패턴 평균) | 처리량 이득은 없다(FR-FCFS가 이미 묶는다) |
 | XOR 주소 매핑 | v2 매핑보다 stride 3×, 연속 주소 +40% (v4 회귀) | 연속 16 word가 한 뱅크 그룹에 있어 연속 읽기가 tCCD_L에 막힌다 |
 | one-hot 선택 | 인덱스로 바꿨다 다시 푸는 단계가 없다(208 → 337 MHz의 일부) | 데이터 선택이 AND-OR 트리 |
 | RD 4개 in flight | 연속 읽기 3.4×(v1 대비) | read-return FIFO |
@@ -441,7 +441,7 @@ flowchart TB
 | reg2reg (ns) | 0.809 | 2.880 | 2.753 | 4.765 | 2.922 | **2.831** |
 | ≈ fmax (MHz) | 1,182 | 343 | 357 | 208 | 337 | **348** |
 
-<sub>≈ fmax는 1 / 최소 주기다. 최소 주기는 reg2reg 지연에 캡처 플롭의 setup을 더한 값이다(v4: 2.831 + 0.043 = 2.874 ns, `make ppa`가 쓰는 `ppa.csv`의 `min_period_ns`). 같은 RTL이 [High-Speed Link Lite](https://github.com/yhkwon-git/High_Speed_Link_Lite)의 칩 STA에서는 2.18 ns(458 MHz, HSL `3d596a4`)로 나온다. 그 흐름은 칩 전체를 모듈 경계를 유지한 채 `abc -D 1250 -constr`(목표 1.25 ns)로 매핑하고 팬아웃 버퍼 트리를 넣는다. 여기 `make ppa`는 `mem_ctrl`만 flatten해 타이밍 목표와 팬아웃 버퍼 없이 매핑한다. 어느 차이가 몇 %인지는 나눠 재지 않았다.</sub>
+<sub>≈ fmax는 1 / 최소 주기다. 최소 주기는 reg2reg 지연에 캡처 플롭의 setup을 더한 값이다(v4: 2.831 + 0.043 = 2.874 ns, `make ppa`가 쓰는 `ppa.csv`의 `min_period_ns`). 같은 RTL이 [High-Speed Link Lite](https://github.com/yhkwon-git/High_Speed_Link_Lite)의 칩 STA에서는 2.18 ns(459 MHz, HSL `e61e90d`)로 나온다. 그 흐름은 칩 전체를 모듈 경계를 유지한 채 `abc -D 1250 -constr`(목표 1.25 ns)로 매핑하고 팬아웃 버퍼 트리를 넣는다. 여기 `make ppa`는 `mem_ctrl`만 flatten해 타이밍 목표와 팬아웃 버퍼 없이 매핑한다. 어느 차이가 몇 %인지는 나눠 재지 않았다.</sub>
 
 v4는 기능이 늘었는데도 v3보다 빠르다. 명령 버스가 하나일 때는 RD/WR와 ACT/PRE 중 하나를 고르는 단계(`use_col`, FCFS면 나이 비교까지)가 critical path에 있었다. 두 버스에서는 그 단계가 필요 없다. RFM을 넣기 전에는 2.612 ns(377 MHz, 커밋 전 측정)였고, 뱅크별 RAA 카운터와 RFM 명령 선택이 행 버스 앞에 붙어 2.831 ns가 됐다.
 

@@ -135,7 +135,7 @@ With `WDRAIN = 1` the cross-queue age matrix (`mc_xage`) and with `PAGE_POLICY =
 | FR-FCFS + row protection | row hits first: higher hit rate and throughput | needs a starvation guard |
 | Read and write queues | writes do not take read entries; the read queue stores no data | 16 entries, cross-queue age (only with `WDRAIN = 0`) |
 | Posted writes + forwarding | 1-cycle write response; 37,434 RAW reads answered without the DRAM (default build) | a write to an address in the read queue waits on the port |
-| Write batches | −19% turnarounds, −1.5% read latency | no throughput gain in this model |
+| Write batches | −19% turnarounds, −1.5% read latency (regression, six patterns; the analysis matrix's random load gives −1.7%) | no throughput gain in this model |
 | XOR address map | 3× on 16-word strides, +40% on sequential traffic against bank:row:col | 16 consecutive words share a bank group, so sequential reads hit tCCD_L |
 | One-hot pick | no encode/decode stage | AND-OR select trees |
 | In-order responses via tags | simple host contract | 16 × 32b buffer, 34% of the FFs |

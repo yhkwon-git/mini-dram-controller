@@ -14,9 +14,11 @@
 //   mc_resp      tags, read-return FIFO, write-data pipeline, in-order responses
 //
 // The DRAM side is DFI-like: a row command bus (ACT, PRE, PREA, REF, REFPB)
-// and a column command bus (RD, WR with auto-precharge) with fixed data
-// latencies (RL, WL) and no busy signal; the controller tracks every timing
-// rule itself. The column bus carries no row: the device uses the open one.
+// and a column command bus (RD, WR with auto-precharge), write data a fixed WL
+// after its WR, read data back on data_valid in RD order (RL after the RD with
+// this repo's DRAM model; a PHY may take longer, the count of RDs in flight is
+// what matters), and no busy signal; the controller tracks every timing rule
+// itself. The column bus carries no row: the device uses the open one.
 //
 // Writes are posted: answered when accepted. A read whose address is in the
 // write queue is answered from the youngest such write (forwarding) and never

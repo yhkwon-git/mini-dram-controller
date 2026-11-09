@@ -1,8 +1,9 @@
 // Response side: response tags, the read-return FIFO, the write-data pipeline
 // and the tag-ordered response buffer.
 //
-// Read data comes back RL edges after its RD, in RD order, so a FIFO of tags
-// says whose data each data_valid carries; a read is done when its data
+// Read data comes back in RD order (RL edges after its RD with this repo's
+// DRAM model, later behind a slower PHY), so a FIFO of tags says whose data
+// each data_valid carries; a read is done when its data
 // arrives, or when it is accepted if mem_ctrl forwards it from the write
 // queue. Writes are posted: a write is done when it is accepted. Write data
 // goes out WL edges after its WR. The host sees responses in request order
